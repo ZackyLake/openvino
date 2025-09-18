@@ -41,6 +41,7 @@ Graph::Graph(std::shared_ptr<ov::Model> model, const RemoteContextImpl::Ptr& con
     : m_context(context)
     , m_config(config)
     , m_stream_id(stream_id) {
+    const auto tbegin = std::chrono::high_resolution_clock::now();
     auto program_builder = std::make_shared<ProgramBuilder>(model, get_engine(), config);
     m_config = program_builder->get_config();
 
@@ -52,6 +53,8 @@ Graph::Graph(std::shared_ptr<ov::Model> model, const RemoteContextImpl::Ptr& con
     profilingIDs = program_builder->profiling_ids;
     perfMap = program_builder->perfMap;
     m_input_layouts = program_builder->get_input_layouts();
+    const auto tend = std::chrono::high_resolution_clock::now();
+    printf("@@##Finish [Graph::~constructor] in [%zu]ms\n", std::chrono::duration_cast<std::chrono::milliseconds>(tend - tbegin).count());
 }
 
 Graph::Graph(cldnn::BinaryInputBuffer &ib, const RemoteContextImpl::Ptr& context, const ExecutionConfig& config, uint16_t stream_id)

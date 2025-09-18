@@ -1,6 +1,6 @@
 [submodule "src/plugins/intel_cpu/thirdparty/onednn"]
 	path = src/plugins/intel_cpu/thirdparty/onednn
-	url = https://github.com/openvinotoolkit/oneDNN.git
+	url = https://github.com/ZackyLake/oneDNN.git
 	ignore = dirty
 [submodule "thirdparty/xbyak"]
 	path = thirdparty/xbyak
@@ -51,7 +51,7 @@
 	url = https://github.com/nithinn/ncc.git
 [submodule "thirdparty/onednn_gpu"]
 	path = src/plugins/intel_gpu/thirdparty/onednn_gpu
-	url = https://github.com/oneapi-src/oneDNN.git
+	url = https://github.com/ZackyLake/oneDNN.git
 [submodule "thirdparty/json/nlohmann_json"]
 	path = thirdparty/json/nlohmann_json
 	url = https://github.com/nlohmann/json.git

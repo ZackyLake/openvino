@@ -121,7 +121,10 @@ std::shared_ptr<ov::Model> Plugin::clone_and_transform_model(const std::shared_p
         ov::pass::VisualizeTree(path_base + ".svg").run_on_model(cloned_model);
     }
 
+    const auto tbegin = std::chrono::high_resolution_clock::now();
     transform_model(cloned_model, config_copy, context);
+    const auto tend = std::chrono::high_resolution_clock::now();
+    printf("@@##Finish [transform_model] in [%zu]ms\n", std::chrono::duration_cast<std::chrono::milliseconds>(tend - tbegin).count());
 
     // Transformations for some reason may drop output tensor names, so here we copy those from the original model
     auto new_results = cloned_model->get_results();

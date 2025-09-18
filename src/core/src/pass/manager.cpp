@@ -140,6 +140,177 @@ private:
 };
 
 class Profiler {
+    struct PassRecord
+    {
+        struct CallEntry
+        {
+            std::string Name;
+            std::vector<CallEntry*> Childs;
+            CallEntry* Parent = nullptr;
+            std::thread::id Tid;
+            float TimeMs = 0.f;
+            uint32_t Depth = 0;
+            bool Changed = false;
+            static CallEntry*& GetCurrent() noexcept 
+            {
+                thread_local CallEntry* cur = nullptr;
+                return cur;
+            }
+            CallEntry(const std::string_view& name) noexcept : Name(name), Tid(std::this_thread::get_id())
+            {
+                auto& cur = GetCurrent();
+                Parent = cur;
+                Depth = Parent ? Parent->Depth + 1 : 0;
+                cur = this;
+            }
+            std::string GetStack(const std::unordered_map<std::string_view, std::string_view>* nameMap = nullptr) const noexcept
+            {
+                std::string stack;
+                for (auto e = Parent; e; e = e->Parent)
+                {
+                    std::string_view name = e->Name;
+                    if (nameMap)
+                    {
+                        if (const auto it = nameMap->find(name); it != nameMap->end())
+                            name = it->second;
+                    }
+                    stack.append("<-[").append(name).append("]");
+                }
+                if (stack.empty())
+                    stack = "(root)";
+                return stack;
+            }
+            constexpr bool operator<(const CallEntry& rhs) const noexcept
+            {
+                return TimeMs == rhs.TimeMs ? (Depth == rhs.Depth ? Changed < rhs.Changed : Depth > rhs.Depth)
+                                            : TimeMs < rhs.TimeMs;
+            }
+        };
+        std::deque<CallEntry> CallEntries;
+        std::atomic_flag Lock = ATOMIC_FLAG_INIT;
+        static inline const std::string Padding = std::string(60, ' ');
+        static const char* GetPad(size_t size) noexcept
+        {
+            const auto len = std::min<size_t>(size, 60);
+            return Padding.c_str() + len;
+        }
+        static const char* GetPad(std::string_view str) noexcept
+        {
+            return GetPad(str.size());
+        }
+        static void PrintStack(std::vector<CallEntry*>& vec, const std::string& prefix, const float timeLimit, const std::unordered_map<std::string_view, std::string_view> nameMap) noexcept
+        {
+            std::sort(vec.begin(), vec.end(), [](const auto& lhs, const auto& rhs) { return *rhs < *lhs; });
+            for (auto& entry : vec)
+            {
+                if (entry->TimeMs < timeLimit)
+                    break;
+                std::string_view name = entry->Name;
+                if (const auto it = nameMap.find(name); it != nameMap.end())
+                    name = it->second;
+                printf("%s[%s%s]: [%8.3f]ms (%c)[%2zu]\n", prefix.c_str(), name.data(), GetPad(prefix.size() + name.size()),
+                    entry->TimeMs, entry->Changed ? '+' : '-', entry->Childs.size());
+                PrintStack(entry->Childs, "|-" + prefix, timeLimit, nameMap);
+            }
+        };
+        ~PassRecord() 
+        {
+            while (Lock.test_and_set());
+            struct Info 
+            {
+                std::vector<const CallEntry*> Entries;
+                float TotalTime = 0.f;
+                uint32_t ChangedCount = 0;
+                void Sort() noexcept 
+                {
+                    std::sort(Entries.begin(), Entries.end(), [](const auto& lhs, const auto& rhs) { return *rhs < *lhs; });
+                }
+                constexpr bool operator<(const Info& rhs) const noexcept 
+                {
+                    return TotalTime == rhs.TotalTime ? ChangedCount < rhs.ChangedCount : TotalTime < rhs.TotalTime;
+                }
+            };
+            std::unordered_map<std::string_view, Info> nameMap;
+            std::vector<CallEntry*> root;
+            std::map<std::thread::id, size_t> tidMap;  // current ST, reserved
+            float totalTime = 0.f;
+            for (auto& entry : CallEntries) 
+            {
+                tidMap.try_emplace(entry.Tid, tidMap.size());
+                auto& info = nameMap[entry.Name];
+                info.Entries.push_back(&entry);
+                info.TotalTime += entry.TimeMs;
+                info.ChangedCount += entry.Changed ? 1 : 0;
+                if (!entry.Parent)
+                    root.push_back(&entry), totalTime += entry.TimeMs;
+                else
+                    entry.Parent->Childs.push_back(&entry);
+            }
+            std::unordered_map<std::string_view, std::string_view> shortNames;
+            std::vector<Info*> infos;
+            for (auto& [name_, info] : nameMap) 
+            {
+                info.Sort();
+                infos.push_back(&info);
+                auto name = name_;
+                if (name.size() > 6 && name.substr(0, 6) == "class ")
+                    name.remove_prefix(6);
+                if (name.size() > 10 && name.substr(0, 10) == "ov::pass::")
+                    name.remove_prefix(10);
+                shortNames.insert_or_assign(name_, name);
+            }
+            std::sort(infos.begin(), infos.end(), [](const auto& lhs, const auto& rhs) { return *rhs < *lhs; });
+            printf("@@##Passes costs [%.2f]ms:\n", totalTime);
+            PrintStack(root, "", totalTime * 0.01f, shortNames);
+            printf("@@##Top 10 Passes:\n");
+            for (uint32_t infoIdx = 0; infoIdx < 10 && infoIdx < infos.size(); ++infoIdx) // Top10
+            {
+                const auto& info = *infos[infoIdx];
+                const auto& first = *(info.Entries.front());
+                const auto name = shortNames[first.Name];
+                printf("--[%s%s]: [%8.3f]ms +[%2u]/[%2zu]\n", name.data(), GetPad(name), info.TotalTime, info.ChangedCount, info.Entries.size());
+                if (info.Entries.size() < 2 && first.Parent)
+                    printf("   %s\n", first.GetStack(&shortNames).c_str());
+                else 
+                {
+                    for (uint32_t i = 0; i < 3 && i < info.Entries.size(); ++i)  // Top3 details
+                    {
+                        const auto& entry = *(info.Entries[i]);
+                        printf("  --[%8.3f]ms %s\n", entry.TimeMs, entry.GetStack(&shortNames).c_str());
+                    }
+                }
+            }
+        }
+        void Begin(const std::string& name) noexcept
+        {
+            while (Lock.test_and_set());
+            CallEntries.emplace_back(name);
+            Lock.clear();
+        }
+        void End(const std::string& name, uint64_t us, bool applied) noexcept
+        {
+            auto& entry = CallEntry::GetCurrent();
+            if (!entry)
+            {
+                printf("!!## current in [NULL] but ending [%s]!\n", name.c_str());
+                return;
+            }
+            if (entry->Name == name)
+            {
+                entry->TimeMs = static_cast<float>(us) / 1000.f;
+                entry->Changed = applied;
+                entry = entry->Parent;
+            }
+            else
+            {
+                printf("!!## current in [%s] but ending [%s]!\n--- inside %s\n",
+                       entry->Name.c_str(),
+                       name.c_str(),
+                       entry->GetStack().c_str());
+            }
+        }
+    };
+    inline static PassRecord Records;
 public:
     /**
      * @brief Profiler class helps to analyze Transformations execution times, visualize/serialize ov model after all
@@ -198,25 +369,25 @@ public:
     }
 
     void start_timer(const std::string& name) {
-        if (m_profile_pass.is_enabled()) {
-            stopwatches[name] = stopwatch();
-            stopwatches[name].start();
+        stopwatches[name] = stopwatch();
+        stopwatches[name].start();
+        Records.Begin(name);
 
-            bool is_pass_manager = name == m_manager_name;
-            if (is_pass_manager) {
-                std::cout << std::setw(25) << std::left;
-                std::cout << "PassManager started: " << m_manager_name << std::endl;
-                std::cout << std::right;
-            }
+        bool is_pass_manager = name == m_manager_name;
+        if (m_profile_pass.is_enabled() && is_pass_manager) {
+            std::cout << std::setw(25) << std::left;
+            std::cout << "PassManager started: " << m_manager_name << std::endl;
+            std::cout << std::right;
         }
     }
 
     void stop_timer(const std::string& name, bool applied) {
-        if (m_profile_pass.is_enabled()) {
-            auto& stopwatch = stopwatches.at(name);
-            stopwatch.stop();
+        auto& stopwatch = stopwatches.at(name);
+        stopwatch.stop();
+        Records.End(name, std::chrono::duration_cast<std::chrono::microseconds>(stopwatch.get_timer_value()).count(), applied);
 
-            bool is_pass_manager = name == m_manager_name;
+        bool is_pass_manager = name == m_manager_name;
+        if (m_profile_pass.is_enabled()) {
             if (m_profile_pass.is_bool()) {
                 std::cout << std::setw(25) << std::left;
                 if (is_pass_manager) {

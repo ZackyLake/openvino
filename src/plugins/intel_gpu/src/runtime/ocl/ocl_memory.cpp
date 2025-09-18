@@ -12,6 +12,9 @@
 #include "ocl_event.hpp"
 #include <stdexcept>
 #include <vector>
+#include <map>
+#include <atomic>
+#include <thread>
 
 #ifdef ENABLE_ONEDNN_FOR_GPU
 #include <oneapi/dnnl/dnnl_ocl.hpp>
@@ -540,11 +543,57 @@ void gpu_usm::unlock(const stream& /* stream */) {
     }
 }
 
+struct FillRecord
+{
+    std::map<size_t, std::tuple<uint32_t, uint32_t, uint32_t, uint64_t>> FillMap;
+    std::map<std::thread::id, uint64_t> ThreadIds;
+    std::atomic_flag Lock = ATOMIC_FLAG_INIT;
+    ~FillRecord()
+    {
+        while (Lock.test_and_set());
+        size_t fillSize = 0;
+        uint64_t fillTime = 0;
+        uint32_t blockCnt = 0, fillCnt = 0;
+        for (const auto& [bytes, info] : FillMap) 
+        {
+            const auto& [fill, zero, tcnt, time] = info;
+            fillCnt += fill + zero;
+            blockCnt += tcnt;
+            fillTime += time;
+            fillSize += bytes * tcnt;
+            printf("@@##Fill [%10zu] : Fill[%4u] Zero[%4u] Avg[%6zu]us\n", bytes, fill, zero, time / (tcnt));
+        }
+        const auto thrCnt = ThreadIds.size();
+        const auto maxTime = std::max_element(ThreadIds.begin(), ThreadIds.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs.second < rhs.second;
+        })->second;
+        printf("@@##USM Fill: Total[%zu]ms [%zu]MB, Avg[%5.2f]MB/s\n@@##-- [%zu]Thread, Max[%zu]ms, (%3u Blocking/%3u)\n",
+            fillTime / 1000, fillSize / 1048576, fillSize / (fillTime * 1.048576),
+            thrCnt, maxTime / 1000, blockCnt, fillCnt);
+    }
+    void Put(size_t bytes, unsigned char pattern, uint64_t us) noexcept
+    {
+        const auto tid = std::this_thread::get_id();
+        {
+            while (Lock.test_and_set());
+            auto& [fill, zero, tcnt, time] = FillMap[bytes];
+            (pattern ? fill : zero)++;
+            if (us > 0) 
+            {
+                ThreadIds[tid] += us;
+                tcnt++, time += us;
+            }
+            Lock.clear();
+        }
+    }
+};
+
 event::ptr gpu_usm::fill(stream& stream, unsigned char pattern, bool blocking) {
     if (_bytes_count == 0) {
         GPU_DEBUG_TRACE_DETAIL << "Skip gpu_usm::fill for 0 size tensor" << std::endl;
         return nullptr;
     }
+    const auto tbegin = std::chrono::high_resolution_clock::now();
     auto& cl_stream = downcast<ocl_stream>(stream);
     auto ev = stream.create_base_event();
     cl::Event& ev_ocl = downcast<ocl_event>(ev.get())->get();
@@ -557,7 +606,9 @@ event::ptr gpu_usm::fill(stream& stream, unsigned char pattern, bool blocking) {
     } catch (cl::Error const& err) {
         OPENVINO_THROW(OCL_ERR_MSG_FMT(err));
     }
-
+    const auto tend = std::chrono::high_resolution_clock::now();
+    static FillRecord Record;
+    Record.Put(_bytes_count, pattern, blocking ? std::chrono::duration_cast<std::chrono::microseconds>(tend - tbegin).count() : 0);
     return ev;
 }
 

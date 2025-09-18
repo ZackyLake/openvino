@@ -89,6 +89,9 @@ if(ENABLE_ONEDNN_FOR_GPU)
             list(APPEND cmake_extra_args "-DCMAKE_MSVC_RUNTIME_LIBRARY=${CMAKE_MSVC_RUNTIME_LIBRARY}")
         endif()
 
+        list(APPEND cmake_extra_args "-DCMAKE_CXX_STANDARD=17")
+        list(APPEND cmake_extra_args "-DCMAKE_CXX_STANDARD_REQUIRED=ON")
+
         # propogate OpenCL if explicitly specified
         if(OpenCL_LIBRARY)
             list(APPEND cmake_extra_args "-DOpenCL_LIBRARY=${OpenCL_LIBRARY}")
