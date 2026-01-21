@@ -17,6 +17,8 @@
 #include "openvino/core/rt_info/weightless_caching_attributes.hpp"
 #include "weightless_graph.hpp"
 
+__declspec(dllimport) void PutMarker(std::string&& txt) noexcept;
+
 namespace {
 bool isInitMetadata(const intel_npu::NetworkMetadata& networkMetadata) {
     if (networkMetadata.inputs.size() == 0) {
@@ -90,6 +92,7 @@ std::shared_ptr<IGraph> DriverCompilerAdapter::compile(const std::shared_ptr<con
     _logger.debug("serialize IR");
     driver_compiler_utils::IRSerializer irSerializer(model, maxOpsetVersion);
     SerializedIR serializedIR = irSerializer.serializeIR(model, compilerVersion, maxOpsetVersion);
+    PutMarker("IR serialized");
 
     std::string buildFlags;
     const bool useIndices = !((compilerVersion.major < 5) || (compilerVersion.major == 5 && compilerVersion.minor < 9));
@@ -107,6 +110,7 @@ std::shared_ptr<IGraph> DriverCompilerAdapter::compile(const std::shared_ptr<con
     const bool bypassCache = !config.get<CACHE_DIR>().empty() || config.get<BYPASS_UMD_CACHING>();
     auto graphDesc = _zeGraphExt->getGraphDescriptor(std::move(serializedIR), buildFlags, bypassCache);
     _logger.debug("compile end");
+    PutMarker("compile end");
 
     OV_ITT_TASK_NEXT(COMPILE_BLOB, "getNetworkMeta");
     auto networkMeta = _zeGraphExt->getNetworkMeta(graphDesc);
@@ -146,6 +150,7 @@ std::shared_ptr<IGraph> DriverCompilerAdapter::compileWS(const std::shared_ptr<o
     _logger.debug("serialize IR");
     driver_compiler_utils::IRSerializer irSerializer(model, maxOpsetVersion);
     SerializedIR serializedIR = irSerializer.serializeIR(model, compilerVersion, maxOpsetVersion);
+    PutMarker("IR serialized");
 
     std::string buildFlags;
     const bool useIndices = !((compilerVersion.major < 5) || (compilerVersion.major == 5 && compilerVersion.minor < 9));
@@ -184,6 +189,7 @@ std::shared_ptr<IGraph> DriverCompilerAdapter::compileWS(const std::shared_ptr<o
         const bool bypassCache = !config.get<CACHE_DIR>().empty() || config.get<BYPASS_UMD_CACHING>();
         auto graphDesc = _zeGraphExt->getGraphDescriptor(serializedIR, buildFlags, bypassCache);
         _logger.debug("compile end");
+        PutMarker("compile end");
 
         OV_ITT_TASK_NEXT(COMPILE_BLOB, "getNetworkMeta");
         NetworkMetadata networkMetadata = _zeGraphExt->getNetworkMeta(graphDesc);

@@ -39,8 +39,8 @@ InputModel::InputModel(std::istream& model_stream,
     : InputModel(model_stream, ov::util::wstring_to_string(path), enable_mmap, std::move(extensions)) {}
 #endif
 
-InputModel::InputModel(std::shared_ptr<ModelProto> model_proto, frontend::ExtensionHolder extensions)
-    : m_editor{std::make_shared<ONNXModelEditor>(model_proto, std::move(extensions))} {}
+InputModel::InputModel(std::shared_ptr<ModelProto> model_proto, const std::string& path, frontend::ExtensionHolder extensions)
+    : m_editor{std::make_shared<ONNXModelEditor>(model_proto, path, std::move(extensions))} {}
 
 std::vector<ov::frontend::Place::Ptr> InputModel::get_inputs() const {
     const auto& inputs = m_editor->model_inputs();

@@ -28,6 +28,16 @@ namespace onednn {
 
 static std::mutex cacheAccessMutex;
 
+struct RuntimeBlobItem;
+struct RuntimeBlobWrapper
+{
+    RuntimeBlobItem* const Item;
+    constexpr RuntimeBlobWrapper(RuntimeBlobItem* item) noexcept : Item(item) {}
+    void Fill(std::vector<uint8_t>&& blob) noexcept;
+    const std::vector<uint8_t>* Get() const noexcept;
+    static RuntimeBlobWrapper Retrieve(const dnnl::primitive_desc_base& pd) noexcept;
+};
+
 template <class PType, class PrimDescType = dnnl::primitive_desc, class PrimType = dnnl::primitive>
 struct typed_primitive_onednn_impl : public typed_primitive_impl<PType> {
     const engine* _engine;
@@ -346,6 +356,8 @@ private:
             cache_outpath = "";
         }
 
+        auto rcache = RuntimeBlobWrapper::Retrieve(_pd);
+
         if (cache_outpath.empty()) {
             _prim = PrimType(_pd);
         } else {
@@ -366,6 +378,7 @@ private:
                     std::lock_guard<std::mutex> lock(cacheAccessMutex);
                     ov::intel_gpu::save_binary(generate_cache_path_from_key(config, key), cache);
                 }
+                rcache.Fill(std::move(cache));
             } else {
                 _prim = PrimType(_pd, cache);
             }

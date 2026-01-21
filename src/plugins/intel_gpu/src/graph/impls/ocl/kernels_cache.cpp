@@ -51,6 +51,8 @@
 #include "gpu/intel/microkernels/fuser.hpp"
 #endif
 
+__declspec(dllimport) void PutMarker(std::string&& txt) noexcept;
+
 namespace {
 std::mutex cacheAccessMutex;
 
@@ -329,6 +331,105 @@ static std::vector<unsigned char> getProgramBinaries(cl::Program program) {
     return program.getInfo<CL_PROGRAM_BINARIES>().front();
 }
 
+struct TimeCounter
+{
+    float Time = 0, MaxTime = 0;
+    uint32_t Count = 0;
+    void Add(float time) noexcept
+    {
+        Time += time;
+        MaxTime = std::max(MaxTime, time);
+        Count++;
+    }
+};
+struct CompileRecords
+{
+    struct TimeRange
+    {
+        std::chrono::high_resolution_clock::time_point TBegin;
+        std::chrono::high_resolution_clock::time_point TEnd;
+        float GetElapseTime() const noexcept
+        {
+            return std::chrono::duration_cast<std::chrono::duration<float, std::milli>>(TEnd - TBegin).count();
+        }
+    };
+    struct Record : public TimeRange
+    {
+        std::thread::id Tid = std::this_thread::get_id();
+        Record() noexcept
+        {
+            TBegin = std::chrono::high_resolution_clock::now();
+        }
+    };
+    struct RecordWrapper
+    {
+        Record& Rec;
+        ~RecordWrapper()
+        {
+            Rec.TEnd = std::chrono::high_resolution_clock::now();
+        }
+    };
+    std::deque<Record> Records;
+    std::atomic<uint64_t> ElapseTime = 0;
+    std::atomic_flag Lock = ATOMIC_FLAG_INIT;
+    ~CompileRecords()
+    {
+        while (Lock.test_and_set());
+        struct TRec : public TimeCounter, public TimeRange
+        {
+            TRec(const Record& rec) noexcept : TimeRange(static_cast<TimeRange>(rec))
+            {
+                Add(rec.GetElapseTime());
+            }
+            void Append(const Record& rec) noexcept
+            {
+                TEnd = rec.TEnd;
+                Add(rec.GetElapseTime());
+            }
+        };
+        std::map<std::thread::id, TRec> threadMap;
+        TimeCounter total;
+        for (const auto& rec : Records)
+        {
+            auto [it, inserted] = threadMap.try_emplace(rec.Tid, rec);
+            if (!inserted)
+                it->second.Append(rec);
+            total.Add(rec.GetElapseTime());
+        }
+        printf("@@## OCL Compile total [%7.2f]ms in [%u] thread, Elapse [%7.2f]ms\n", total.Time, total.Count, static_cast<float>(ElapseTime.load()) / 1000.f);
+        for (const auto& [tid, trec] : threadMap)
+        {
+            printf("--- total[%7.2f]ms@[%u] max[%7.2f]ms elapse[%7.2f]ms\n", trec.Time, trec.Count, trec.MaxTime, trec.GetElapseTime());
+        }
+    }
+    static CompileRecords& Get()
+    {
+        static CompileRecords Host;
+        return Host;
+    }
+    static RecordWrapper Put()
+    {
+        auto& host = Get();
+        while (host.Lock.test_and_set());
+        auto& ret = host.Records.emplace_back();
+        host.Lock.clear();
+        return {ret};
+    }
+    struct RegionWrapper
+    {
+        CompileRecords& Host;
+        std::chrono::high_resolution_clock::time_point TBegin;
+        ~RegionWrapper()
+        {
+            Host.ElapseTime += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - TBegin).count();
+        }
+    };
+    static RegionWrapper CompileRegion()
+    {
+        return { Get(), std::chrono::high_resolution_clock::now() };
+    }
+};
+
 // TODO: This build_batch method should be backend specific
 void kernels_cache::build_batch(const batch_program& batch, compiled_kernels& compiled_kernels) {
     OV_ITT_SCOPED_TASK(ov::intel_gpu::itt::domains::intel_gpu_plugin, "KernelsCache::build_batch");
@@ -384,6 +485,7 @@ void kernels_cache::build_batch(const batch_program& batch, compiled_kernels& co
         if (precompiled_kernels.empty()) {
             cl::Program program(cl_build_device.get_context(), batch.source);
             {
+                const auto rec = CompileRecords::Put();
                 OV_ITT_SCOPED_TASK(ov::intel_gpu::itt::domains::intel_gpu_plugin, "KernelsCache::BuildProgram::RunCompilation");
                 if (program.build({cl_build_device.get_device()}, batch.options.c_str()) != CL_SUCCESS)
                     throw std::runtime_error("Failed in building program.");
@@ -556,6 +658,9 @@ void kernels_cache::build_all() {
     if (!_pending_compilation)
         return;
 
+    PutMarker("ocl compile");
+    [[maybe_unused]] const auto region = CompileRecords::CompileRegion();
+
     std::vector<batch_program> batches;
     {
         std::lock_guard<std::mutex> lock(_mutex);
@@ -610,6 +715,8 @@ void kernels_cache::build_all() {
         malloc_trim(0);
 #endif
     }
+
+    PutMarker("~ocl compile");
 }
 
 void kernels_cache::reset() {
@@ -619,18 +726,42 @@ void kernels_cache::reset() {
     _pending_compilation = false;
 }
 
+struct CLKernelRecord
+{
+    std::deque<std::pair<primitive_id, uint32_t>> AddedSource;
+    uint32_t CacheHit = 0;
+    ~CLKernelRecord()
+    {
+        printf("@@##CL Kernel Cache: Hit[%3u] Added[%3zu]:\n", CacheHit, AddedSource.size());
+        /*for (const auto& [id, cnt] : AddedSource)
+        {
+            printf("--- [%2u]Src: [%s]\n", cnt, id.c_str());
+        }*/
+    }
+};
+
 void kernels_cache::add_kernels_source(const kernel_impl_params& params,
                                         const std::vector<std::shared_ptr<kernel_string>>& kernel_sources,
                                         bool dump_custom_program) {
+    static CLKernelRecord Records;
     std::lock_guard<std::mutex> lock(_mutex);
 
     if (!kernel_sources.empty() && (_kernels_code.find(params) == _kernels_code.end())) {
+        primitive_id pinfo;
+        if (params.desc)
+            pinfo = params.desc->get_type_info();
+        Records.AddedSource.emplace_back(std::move(pinfo), static_cast<uint32_t>(kernel_sources.size()));
         auto res = _kernels_code.insert({params, {kernel_sources, params, dump_custom_program}});
 
         assert(_kernels.find(params) == _kernels.end());
         if (res.second) {
             _pending_compilation = true;
         }
+    }
+    else
+    {
+        if (!kernel_sources.empty())
+            Records.CacheHit++;
     }
 }
 

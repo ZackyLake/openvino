@@ -18,6 +18,8 @@
 #include "openvino/runtime/so_ptr.hpp"
 #include "transformations/utils/utils.hpp"
 
+void PutMarker(std::string&& txt) noexcept;
+
 #define OV_INFER_REQ_CALL_STATEMENT(...)                                    \
     OPENVINO_ASSERT(_impl != nullptr, "InferRequest was not initialized."); \
     try {                                                                   \
@@ -221,6 +223,7 @@ Tensor InferRequest::get_output_tensor() {
 }
 
 void InferRequest::infer() {
+    PutMarker("infer");
     OV_INFER_REQ_CALL_STATEMENT(_impl->infer());
 }
 

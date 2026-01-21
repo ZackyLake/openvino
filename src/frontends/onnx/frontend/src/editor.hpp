@@ -61,6 +61,7 @@ public:
     ///
     /// \param model_proto A shared pointer on ModelProto object.
     /// \param extensions Holder for custom extensions (like custom ops).
+    ONNXModelEditor(std::shared_ptr<ModelProto> model_proto, const std::string& model_path, frontend::ExtensionHolder extensions = {});
     ONNXModelEditor(std::shared_ptr<ModelProto> model_proto, frontend::ExtensionHolder extensions = {});
 
     /// \brief Modifies the in-memory representation of the model by setting

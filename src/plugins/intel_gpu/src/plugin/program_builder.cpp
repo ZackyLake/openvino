@@ -31,6 +31,7 @@
 #include <malloc.h>
 #endif
 
+__declspec(dllimport) void PutMarker(std::string&& txt) noexcept;
 
 namespace ov::intel_gpu {
 
@@ -138,6 +139,8 @@ void ProgramBuilder::cleanup_build() {
 }
 
 std::shared_ptr<cldnn::program> ProgramBuilder::build(const std::vector<std::shared_ptr<ov::Node>>& ops, bool is_inner_program) {
+    PutMarker("ProgramBuilder::build");
+    const auto tbegin = std::chrono::high_resolution_clock::now();
     OV_ITT_SCOPED_TASK(itt::domains::intel_gpu_plugin, "ProgramBuilder::build");
 
     prepare_build();
@@ -163,6 +166,9 @@ std::shared_ptr<cldnn::program> ProgramBuilder::build(const std::vector<std::sha
         OPENVINO_ASSERT(false, "[GPU] ProgramBuilder build failed!\n", e.what());
     }
     cleanup_build();
+    const auto tend = std::chrono::high_resolution_clock::now();
+    printf("@@##Finish [ProgramBuilder::build] in [%zu]ms\n", std::chrono::duration_cast<std::chrono::milliseconds>(tend - tbegin).count());
+    PutMarker("~ProgramBuilder::build");
 
     return program;
 }

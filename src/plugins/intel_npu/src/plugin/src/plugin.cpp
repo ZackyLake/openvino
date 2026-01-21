@@ -29,6 +29,8 @@
 #include "remote_context.hpp"
 #include "transformations.hpp"
 
+__declspec(dllimport) void PutMarker(std::string&& txt) noexcept;
+
 using namespace intel_npu;
 
 namespace {
@@ -569,6 +571,7 @@ ov::Any Plugin::get_property(const std::string& name, const ov::AnyMap& argument
 
 std::shared_ptr<ov::ICompiledModel> Plugin::compile_model(const std::shared_ptr<const ov::Model>& model,
                                                           const ov::AnyMap& properties) const {
+    PutMarker("compile_model");
     OV_ITT_SCOPED_TASK(itt::domains::NPUPlugin, "Plugin::compile_model");
 
     // Before going any further: if
@@ -755,6 +758,7 @@ std::shared_ptr<ov::ICompiledModel> Plugin::compile_model(const std::shared_ptr<
 
     ++_compiledModelLoadCounter;
     OV_ITT_TASK_SKIP(PLUGIN_COMPILE_MODEL);
+    PutMarker("~compile_model");
 
     return compiledModel;
 }

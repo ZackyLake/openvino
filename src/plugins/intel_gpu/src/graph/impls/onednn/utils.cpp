@@ -3,12 +3,98 @@
 //
 
 #include "utils.hpp"
+#include "primitive_onednn_base.h"
 #include <oneapi/dnnl/dnnl_debug.h>
 #include <numeric>
 #include <oneapi/dnnl/dnnl_ocl.hpp>
 
 namespace cldnn {
 namespace onednn {
+
+struct RuntimeBlobKey
+{
+    static size_t GetHash(const uint8_t* data, size_t size) noexcept 
+    {
+        std::string_view str(reinterpret_cast<const char*>(data), size);
+        return std::hash<std::string_view>{}(str);
+    }
+    std::vector<uint8_t> Data;
+    size_t Hash;
+    RuntimeBlobKey(const dnnl::primitive_desc_base& pd) noexcept : 
+        Data(pd.get_cache_blob_id()), Hash(GetHash(Data.data(), Data.size())) {}
+    bool operator==(const RuntimeBlobKey& other) const noexcept 
+    { 
+        return Data == other.Data;
+    }
+};
+struct RuntimeBlobKeyHash
+{
+    constexpr size_t operator()(const RuntimeBlobKey& key) const noexcept
+    {
+        return key.Hash;
+    }
+};
+
+struct RuntimeBlobItem
+{
+    std::vector<uint8_t> Blob;
+    dnnl_primitive_kind_t Kind;
+    uint32_t HitCount = 1;
+    RuntimeBlobItem(const dnnl::primitive_desc_base& pd) noexcept : Kind(static_cast<dnnl_primitive_kind_t>(pd.get_kind())) {}
+};
+struct RuntimeBlobCache 
+{
+    std::unordered_map<RuntimeBlobKey, RuntimeBlobItem, RuntimeBlobKeyHash> BlobStore;
+    std::atomic_flag Lock = ATOMIC_FLAG_INIT;
+    ~RuntimeBlobCache()
+    {
+        while (Lock.test_and_set());
+        struct HitCounter
+        {
+            uint32_t BlobCount = 0;
+            uint32_t HitCount = 0;
+            void Add(const RuntimeBlobItem& item) noexcept
+            {
+                BlobCount++;
+                HitCount += item.HitCount;
+            }
+        };
+        std::map<dnnl_primitive_kind_t, HitCounter> kindMap;
+        HitCounter total;
+        for (const auto& [key, val] : BlobStore)
+        {
+            kindMap[val.Kind].Add(val);
+            total.Add(val);
+        }
+        printf("@@## Runtime Blob cache: create[%4u] hit[%4u]:\n", total.BlobCount, total.HitCount);
+        for (const auto& [kind, cnt] : kindMap)
+        {
+            printf("--- [%20s] : create[%4u] hit[%4u], rate[%6.2f%%]\n", 
+                dnnl_prim_kind2str(kind), cnt.BlobCount, cnt.HitCount, (cnt.HitCount - cnt.BlobCount) * 100.0 / cnt.HitCount);
+        }
+    }
+};
+void RuntimeBlobWrapper::Fill(std::vector<uint8_t>&& blob) noexcept
+{
+    if (Item)
+        Item->Blob.swap(blob);
+}
+const std::vector<uint8_t>* RuntimeBlobWrapper::Get() const noexcept 
+{
+    return Item ? &Item->Blob : nullptr;
+}
+RuntimeBlobWrapper RuntimeBlobWrapper::Retrieve(const dnnl::primitive_desc_base& pd) noexcept 
+{
+    static RuntimeBlobCache Cache;
+    RuntimeBlobKey key(pd);
+    while (Cache.Lock.test_and_set());
+    auto [it, inserted] = Cache.BlobStore.try_emplace(key, pd);
+    if (!inserted)
+        it->second.HitCount++;
+    Cache.Lock.clear();
+    return &(it->second);
+}
+
 
 template <typename T>
 cldnn::memory::ptr convert_zp_data_to_s32(const memory::ptr zp_memory) {

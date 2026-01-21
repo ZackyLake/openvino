@@ -6,6 +6,8 @@
 #include "program_node.h"
 #include "primitive_inst.h"
 
+__declspec(dllimport) void PutMarker(std::string&& txt) noexcept;
+
 namespace cldnn {
 
 shape_types ImplementationManager::get_shape_type(const kernel_impl_params& impl_params) {
@@ -54,7 +56,70 @@ bool ImplementationManager::is_supported(const program_node& node, const std::se
     return true;
 }
 
+
+struct RunRecord
+{
+    std::map<std::thread::id, std::vector<std::pair<const char*, uint64_t>>> RunMap;
+    std::atomic_flag Lock = ATOMIC_FLAG_INIT;
+    ~RunRecord()
+    {
+        while (Lock.test_and_set());
+        std::map<std::string_view, std::pair<float, uint32_t>, std::less<>> nameMap;
+        float maxTime = 0, totalTime = 0;
+        for (const auto& [tid, runs] : RunMap) 
+        {
+            float time = 0;
+            for (const auto& [name, t] : runs)
+            {
+                auto& [ntime, ncnt] = nameMap[name];
+                const auto ms = static_cast<float>(t) / 1000.f;
+                ntime += ms, ncnt++, time += ms;
+            }
+            maxTime = std::max(maxTime, time);
+            totalTime += time;
+        }
+        printf("@@##ImplMan [%zu]Threads Total[%.2f]ms Max[%.2f]ms\n", RunMap.size(), totalTime, maxTime);
+        for (const auto& [name, info] : nameMap)
+        {
+            const auto& [time, cnt] = info;
+            auto nstr = name.data();
+            if (name.size() > 7 && name.substr(0, 7) == "struct ")
+                nstr += 7;
+            printf("---- [%40s] : [%8.2f]ms @ [%4u]\n", nstr, time, cnt);
+        }
+    }
+    void Put(const char* name, uint64_t us) noexcept
+    {
+        const auto tid = std::this_thread::get_id();
+        {
+            while (Lock.test_and_set());
+            auto& runs = RunMap[tid];
+            runs.emplace_back(name, us);
+            Lock.clear();
+        }
+    }
+    struct Rec
+    {
+        const std::chrono::high_resolution_clock::time_point Tbegin = std::chrono::high_resolution_clock::now();
+        RunRecord& Host;
+        const char* Name;
+        Rec(RunRecord& host, const char* name) noexcept : Host(host), Name(name) {}
+        ~Rec()
+        {
+            const auto tend = std::chrono::high_resolution_clock::now();
+            Host.Put(Name, std::chrono::duration_cast<std::chrono::microseconds>(tend - Tbegin).count());
+        }
+    };
+    Rec Mark(const char* name) noexcept
+    {
+        return Rec(*this, name);
+    }
+};
+
 std::unique_ptr<primitive_impl> ImplementationManager::create(const program_node& node, const kernel_impl_params& params) const {
+    static RunRecord Records;
+    auto mark = Records.Mark(get_type_info().name);
+    PutMarker(std::string("[impl]") + mark.Name);
     if (auto impl = create_impl(node, params)) {
         update_impl(*impl, params);
         impl->set_node_params(node);

@@ -47,6 +47,8 @@ using namespace ov::frontend::onnx::common;
 using ::ONNX_NAMESPACE::ModelProto;
 using ::ONNX_NAMESPACE::Version;
 
+__declspec(dllimport) void PutMarker(std::string&& txt) noexcept;
+
 namespace {
 // !!! Experimental feature, it may be changed or removed in the future !!!
 void enumerate_constants(const std::shared_ptr<ov::Model>& model) {
@@ -90,6 +92,8 @@ ov::frontend::InputModel::Ptr FrontEnd::load_impl(const std::vector<ov::Any>& va
     }
     // enable mmap by default
     const bool enable_mmap = variants[variants.size() - 1].is<bool>() ? variants[variants.size() - 1].as<bool>() : true;
+
+    PutMarker("load onnx");
 
     if (variants[0].is<std::string>()) {
         const auto path = variants[0].as<std::string>();
@@ -137,9 +141,12 @@ ov::frontend::InputModel::Ptr FrontEnd::load_impl(const std::vector<ov::Any>& va
         FRONT_END_GENERAL_CHECK(model_proto_addr != 0, "Wrong address of a ModelProto object is passed");
         ModelProto* model_proto_ptr = static_cast<ModelProto*>(model_proto_addr);
         FRONT_END_GENERAL_CHECK(
-            model_proto_ptr->has_ir_version() && model_proto_ptr->ir_version() < Version::IR_VERSION,
+            model_proto_ptr->has_ir_version() && model_proto_ptr->ir_version() <= Version::IR_VERSION,
             "A ModelProto object contains unsupported IR version");
-        return std::make_shared<InputModel>(std::make_shared<ModelProto>(*model_proto_ptr), m_extensions);
+        std::string model_path;
+        if (variants.size() > 1 && variants[1].is<std::string>())
+            model_path = variants[1].as<std::string>();
+        return std::make_shared<InputModel>(std::make_shared<ModelProto>(*model_proto_ptr), model_path, m_extensions);
     }
     // !!! End of Experimental feature
     if (variants[0].is<GraphIterator::Ptr>()) {

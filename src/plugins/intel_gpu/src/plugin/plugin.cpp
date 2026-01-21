@@ -45,6 +45,8 @@
 #include "transformations/rt_info/fused_names_attribute.hpp"
 #include "transformations/utils/utils.hpp"
 
+__declspec(dllimport) void PutMarker(std::string&& txt) noexcept;
+
 // Undef DEVICE_TYPE macro which can be defined somewhere in windows headers as DWORD and conflict with our metric
 #ifdef DEVICE_TYPE
 #undef DEVICE_TYPE
@@ -177,7 +179,12 @@ std::shared_ptr<ov::Model> Plugin::clone_and_transform_model(const std::shared_p
             set_weightless_cache_attributes(cloned_model);
     }
 
+    PutMarker("transform_model");
+    const auto tbegin = std::chrono::high_resolution_clock::now();
     transform_model(cloned_model, config_copy, context);
+    const auto tend = std::chrono::high_resolution_clock::now();
+    printf("@@##Finish [transform_model] in [%zu]ms\n", std::chrono::duration_cast<std::chrono::milliseconds>(tend - tbegin).count());
+    PutMarker("~transform_model");
 
     // Transformations for some reason may drop output tensor names, so here we copy those from the original model
     auto new_results = cloned_model->get_results();
@@ -235,6 +242,7 @@ Plugin::Plugin() {
 }
 
 std::shared_ptr<ov::ICompiledModel> Plugin::compile_model(const std::shared_ptr<const ov::Model>& model, const ov::AnyMap& orig_config) const {
+    PutMarker("compile_model");
     OV_ITT_SCOPED_TASK(itt::domains::intel_gpu_plugin, "Plugin::compile_model");
     std::string device_id = get_device_id(orig_config);
 
@@ -244,12 +252,18 @@ std::shared_ptr<ov::ICompiledModel> Plugin::compile_model(const std::shared_ptr<
 
     ExecutionConfig config = m_configs_map.at(device_id);
     config.set_user_property(orig_config, OptionVisibility::RELEASE);
+    if (const auto evar = std::getenv("newshapeinfer"); evar && std::string_view("true") == evar)
+    {
+        config.set_property(ov::intel_gpu::allow_new_shape_infer(true));
+        printf("@@## Enable [allow_new_shape_infer]\n");
+    }
 
     auto transformed_model = clone_and_transform_model(model, config, context);
 
     config.finalize(context.get(), transformed_model.get());
     {
         OV_ITT_SCOPED_TASK(itt::domains::intel_gpu_plugin, "Plugin::compile_model::CreateCompiledModel");
+        PutMarker("~compile_model");
         return std::make_shared<CompiledModel>(transformed_model, shared_from_this(), context, config);
     }
 }
@@ -366,13 +380,34 @@ ov::SupportedOpsMap Plugin::query_model(const std::shared_ptr<const ov::Model>& 
 std::shared_ptr<ov::ICompiledModel> Plugin::import_model(std::istream& model, const ov::AnyMap& config) const {
     std::string device_id = get_device_id(config);
     auto context = get_default_context(device_id);
-    return import_model(model, { context, nullptr }, config);
+    return import_model(&model, { context, nullptr }, config);
 }
 
 std::shared_ptr<ov::ICompiledModel> Plugin::import_model(std::istream& model,
                                                          const ov::SoPtr<ov::IRemoteContext>& context,
+                                                         const ov::AnyMap& config) const {
+    return import_model(&model, context, config);
+}
+
+std::shared_ptr<ov::ICompiledModel> Plugin::import_model(std::variant<std::istream*, const ov::Tensor*> model,
+                                                         const ov::SoPtr<ov::IRemoteContext>& context,
                                                          const ov::AnyMap& orig_config) const {
     OV_ITT_SCOPED_TASK(itt::domains::intel_gpu_plugin, "Plugin::ImportNetwork");
+    struct Exiter
+    {
+        const std::chrono::high_resolution_clock::time_point Tbegin = std::chrono::high_resolution_clock::now();
+        Exiter()
+        {
+            PutMarker("import_model");
+        }
+        ~Exiter()  
+        {
+            const auto tend = std::chrono::high_resolution_clock::now();
+            printf("@@##Finish [import_model] in [%zu]ms\n", std::chrono::duration_cast<std::chrono::milliseconds>(tend - Tbegin).count());
+            PutMarker("~import_model");
+        }
+    };
+    Exiter dummy;
 
     auto context_impl = get_context_impl(context);
     context_impl->initialize();
@@ -398,11 +433,20 @@ std::shared_ptr<ov::ICompiledModel> Plugin::import_model(std::istream& model,
     ov::CacheMode cache_mode = config.get_cache_mode();
     ov::EncryptionCallbacks encryption_callbacks = config.get_cache_encryption_callbacks();
 
-    std::unique_ptr<cldnn::BinaryInputBuffer> ib_ptr =
-        encryption_callbacks.decrypt ? std::make_unique<cldnn::EncryptedBinaryInputBuffer>(model,
-                                                                                 context_impl->get_engine(),
-                                                                                 encryption_callbacks.decrypt)
-                           : std::make_unique<cldnn::BinaryInputBuffer>(model, context_impl->get_engine());
+    std::unique_ptr<cldnn::BinaryInputBuffer> ib_ptr;
+    if (model.index() == 0) {
+        auto& stream = *std::get<0>(model);
+        ib_ptr = encryption_callbacks.decrypt
+                     ? std::make_unique<cldnn::EncryptedBinaryInputBuffer>(stream, context_impl->get_engine(), encryption_callbacks.decrypt)
+                     : std::make_unique<cldnn::BinaryInputBuffer>(stream, context_impl->get_engine());
+    } else {
+        auto& tensor = *std::get<1>(model);
+        SharedStreamBuffer buf{tensor.data<char>(), tensor.get_byte_size()};
+        std::istream stream(&buf);
+        ib_ptr = encryption_callbacks.decrypt
+                     ? std::make_unique<cldnn::EncryptedBinaryInputBuffer>(stream, context_impl->get_engine(), encryption_callbacks.decrypt)
+                     : std::make_unique<cldnn::DirectBinaryInputBuffer>(tensor.data<char>(), tensor.get_byte_size(), context_impl->get_engine());
+    }
     auto& ib = *ib_ptr;
 
     ov::CacheMode loaded_cache_mode = ov::CacheMode::OPTIMIZE_SPEED;
@@ -440,15 +484,13 @@ std::shared_ptr<ov::ICompiledModel> Plugin::import_model(const ov::Tensor& model
                                                          const ov::AnyMap& config) const{
     std::string device_id = get_device_id(config);
     auto context = get_default_context(device_id);
-    return import_model(model, { context, nullptr }, config);
+    return import_model(&model, { context, nullptr }, config);
 }
 
 std::shared_ptr<ov::ICompiledModel> Plugin::import_model(const ov::Tensor& model,
                                                          const ov::SoPtr<ov::IRemoteContext>& context,
                                                          const ov::AnyMap& config) const{
-    SharedStreamBuffer buf{model.data(), model.get_byte_size()};
-    std::istream stream(&buf);
-    return import_model(stream, context, config);
+    return import_model(&model, context, config);
 }
 
 ov::Any Plugin::get_property(const std::string& name, const ov::AnyMap& options) const {
