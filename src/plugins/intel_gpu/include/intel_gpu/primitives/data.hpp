@@ -429,6 +429,7 @@ struct data : public primitive_base<data> {
                     ib >> make_data(_buf.data(), data_size);
                     mem->copy_from(strm, _buf.data());
                 } else {
+                    printf("load_weights [%s] uses DB-copy for [%zu]\n", id.c_str(), data_size);
                     std::vector<uint8_t> _buf1(DATA_BLOCK_SIZE);
                     std::vector<uint8_t> _buf2(DATA_BLOCK_SIZE);
                     bool buf_flag = true;

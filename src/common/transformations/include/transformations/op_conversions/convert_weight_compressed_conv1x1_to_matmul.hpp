@@ -11,6 +11,7 @@ namespace ov {
 namespace pass {
 
 class TRANSFORMATIONS_API ConvertWeightCompressedConv1x1ToMatmul;
+class TRANSFORMATIONS_API RewireMatMulDim3;
 
 }  // namespace pass
 }  // namespace ov
@@ -126,4 +127,10 @@ class ov::pass::ConvertWeightCompressedConv1x1ToMatmul : public ov::pass::Matche
 public:
     OPENVINO_MATCHER_PASS_RTTI("ConvertWeightCompressedConv1x1ToMatmul");
     ConvertWeightCompressedConv1x1ToMatmul();
+};
+
+class ov::pass::RewireMatMulDim3 : public ov::pass::MatcherPass {
+public:
+    OPENVINO_MATCHER_PASS_RTTI("RewireMatMulDim3");
+    RewireMatMulDim3();
 };

@@ -981,6 +981,26 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
         }
     }
 
+    static const auto inplacekv = []() {
+        const auto txt = std::getenv("inplacekv");
+        return txt && txt == std::string_view("true");
+    }();
+
+    if (inplacekv && get_node().is_type<scatter_elements_update>() && actual_layouts[0] == _impl_params->get_input_layout(0)) {
+        GPU_DEBUG_TRACE_DETAIL << id() << ": try make scatter_elements_update inplace" << std::endl;
+        //getchar();
+        if (!_outputs[0]) {
+            GPU_DEBUG_TRACE_DETAIL << id() << ": make output[" << _impl_params->get_output_layout(0).to_short_string() << "] be input["
+                                   << _impl_params->get_input_layout(0).to_short_string() << "]" << std::endl;
+            _outputs[0] = input_memory_ptr(0);
+            _max_output_layout_count[0] = _outputs[0]->count();
+
+        } else {
+            GPU_DEBUG_TRACE_DETAIL << id() << ": has output[" << _outputs[0]->buffer_ptr() << "] and input[" << input_memory_ptr(0)->buffer_ptr() << "]"
+                                   << std::endl;
+        }
+    }
+
     // update layout to ensure that it respects paddings for correct allocation size
     if (_node_output_layout.data_padding.is_dynamic()) {
         auto update_padding = [](layout& orig_layout) {
@@ -1754,6 +1774,9 @@ void primitive_inst::do_runtime_in_place_concat() {
         concat_inst->set_can_be_optimized(false);
         return;
     }
+
+    GPU_DEBUG_TRACE_DETAIL << "[In place concat] Evaluate [" << id() << "] with concat[" << concat_inst->id() << "]" << std::endl;
+
     // Currently does not support cascaded concats
     std::vector<primitive_inst*> concat_preds;
     for (auto pred : concat_inst->_deps) {
@@ -2082,6 +2105,15 @@ void primitive_inst::prepare_primitive() {
                 update_weights();
                 realloc_if_needed(prev_execution_skipped);
             }
+        }
+
+        // output is previously released and need to realloc
+        if (_output_released) {
+            OPENVINO_ASSERT(!_outputs.empty());
+            OPENVINO_ASSERT(!_outputs[0]);
+            OPENVINO_ASSERT(_impl_params->get_output_layout().is_static() && _impl_params->get_output_layout().count() > 0);
+            realloc_if_needed(prev_execution_skipped);
+            OPENVINO_ASSERT(!_output_released);
         }
 
         // Paged Attention may require dispatch data update and internal buffers reallocation
@@ -2721,8 +2753,36 @@ std::vector<memory::ptr> primitive_inst::allocate_outputs(kernel_impl_params* up
                                             runtime_alloc));
         }
     }
+    _output_released = false;
     return outputs;
 }
+
+void primitive_inst::release_outputs() {
+    if (_is_output || _is_input || can_be_optimized()) {
+        return;
+    }
+    //printf("=>release output on [%s]\n", id().c_str());
+    get_network().get_memory_pool().release_memory(_outputs[0].get(), get_node().get_unique_id(), id(), get_network_id());
+    clear_output_memory();
+    _output_released = true;
+    //for (auto& output : _outputs) {
+    //    output.reset();
+    //}
+}
+void primitive_inst::release_internal() {
+    for (auto& mem : this->_intermediates_memory) {
+        mem.reset();
+    }
+}
+void primitive_inst::restore_outputs() {
+    if (!_is_dynamic && _output_released) {
+        OPENVINO_ASSERT(!_is_output);
+        _outputs = allocate_outputs(nullptr, false, true);
+        OPENVINO_ASSERT(!_outputs.empty() && _outputs[0]);
+        OPENVINO_ASSERT(!_output_released);
+    }
+}
+
 
 std::vector<primitive_inst*> primitive_inst::build_exec_deps(std::vector<std::pair<primitive_inst*, int32_t>> const& deps) {
     std::vector<primitive_inst*> exec_deps;

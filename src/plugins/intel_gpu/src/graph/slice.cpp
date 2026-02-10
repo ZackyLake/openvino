@@ -44,7 +44,7 @@ layout slice_inst::calc_output_layout(slice_node const& node, kernel_impl_params
 }
 
 template <typename ShapeType>
-inline std::vector<layout> slice_inst::calc_output_layouts(const slice_node&, const kernel_impl_params& impl_param) {
+inline std::vector<layout> slice_inst::calc_output_layouts(const slice_node& node, const kernel_impl_params& impl_param) {
     std::vector<ShapeType> input_shapes{impl_param.input_layouts[0].get<ShapeType>()};
     std::unordered_map<size_t, ov::Tensor> const_data;
     for (std::size_t i = 1; i < impl_param.input_layouts.size(); i++) {
@@ -70,6 +70,16 @@ inline std::vector<layout> slice_inst::calc_output_layouts(const slice_node&, co
                             gpu_mem_lock.data()));
         }
         input_shapes.push_back(input_shape);
+    }
+    for (const auto& [i, tensor] : const_data) {
+        const auto data = ov::get_tensor_data_as<int32_t>(tensor);
+        std::string txt;
+        for (const auto x : data) {
+            txt.append(std::to_string(x)).append(",");
+        }
+        if (!txt.empty())
+            txt.pop_back();
+        GPU_DEBUG_TRACE_DETAIL << node.id() << " : constdata[" << i << "] = [" << txt << "]" << std::endl;
     }
     ov::op::v8::Slice op;
     auto output_shapes = shape_infer(&op, input_shapes, ov::make_tensor_accessor(const_data));

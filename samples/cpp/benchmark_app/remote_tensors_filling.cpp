@@ -112,7 +112,7 @@ std::map<std::string, ov::TensorVector> get_remote_input_tensors(
 
                 void* mappedPtr = oclInstance->_queue.enqueueMapBuffer(clBuffer.back(),
                                                                        CL_TRUE,
-                                                                       CL_MEM_READ_WRITE,
+                                                                       CL_MAP_WRITE,
                                                                        0,
                                                                        (cl::size_type)inputSize);
 
@@ -136,6 +136,61 @@ std::map<std::string, ov::TensorVector> get_remote_input_tensors(
 #endif
 }
 
+
+std::map<std::string, ov::TensorVector> copy_remote_input_tensors(
+    const std::map<std::string, ov::TensorVector>& inputs,
+    const std::vector<benchmark_app::InputsInfo>& app_inputs_info,
+    const ov::CompiledModel& compiledModel,
+    std::vector<BufferType>& clBuffer,
+    size_t num_requests) {
+#ifdef HAVE_GPU_DEVICE_MEM_SUPPORT
+    slog::info << "Device memory will be used for input and output blobs" << slog::endl;
+
+    std::map<std::string, ov::TensorVector> remoteTensors;
+    auto context = compiledModel.get_context();
+    auto& oclContext = static_cast<ov::intel_gpu::ocl::ClContext&>(context);
+    auto oclInstance = std::make_shared<gpu::OpenCL>(oclContext.get());
+
+    for (const auto& [name, tensors] : inputs) {
+        auto& rts = remoteTensors[name];
+        for (const auto& t : tensors) {
+            auto inputSize = t.get_byte_size();
+
+            cl_int err;
+            clBuffer.push_back(
+                cl::Buffer(oclInstance->_context, CL_MEM_READ_WRITE, (cl::size_type)inputSize, NULL, &err));
+
+            void* mappedPtr = oclInstance->_queue.enqueueMapBuffer(clBuffer.back(),
+                                                                   CL_TRUE,
+                                                                   CL_MAP_WRITE | CL_MAP_READ,
+                                                                   0,
+                                                                   (cl::size_type)inputSize);
+
+            auto tensor = oclContext.create_tensor(t.get_element_type(), t.get_shape(), clBuffer.back().get());
+            rts.push_back(tensor);
+
+            memcpy(mappedPtr, t.data(), inputSize);
+
+            const auto src = reinterpret_cast<const uint32_t*>(t.data());
+            const auto dst = reinterpret_cast<const uint32_t*>(mappedPtr);
+            printf("==copy remote [%s](%8zu): [%08X]->[%08X](%p)\n",
+                   name.c_str(),
+                   inputSize,
+                   src[0],
+                   dst[0],
+                   mappedPtr);
+
+            oclInstance->_queue.enqueueUnmapMemObject(clBuffer.back(), mappedPtr);
+        }
+    }
+    oclInstance->_queue.flush();
+    return remoteTensors;
+#else
+    OPENVINO_THROW("Device memory requested for GPU device, but OpenCL was not linked");
+#endif
+}
+
+
 ov::Shape get_static_shape(const ov::Output<const ov::Node>& compiled_output) {
     // FIXME: this is a WA for case when original model has internal dynamism (NonMaxSuppression)
     // and runtime has static output due to conversions to legacy op and lack of dynamism support
@@ -148,28 +203,45 @@ ov::Shape get_static_shape(const ov::Output<const ov::Node>& compiled_output) {
                        "Output: ",
                        compiled_output);
     ov::Shape shape;
+    static std::set<std::string> warned;
     for (const auto& dimension : compiled_pshape) {
         if (dimension.get_interval().has_upper_bound())
             shape.push_back(static_cast<ov::Shape::value_type>(dimension.get_max_length()));
-        else
-            OPENVINO_THROW("Benchmark App - NOT IMPLEMENTED - Fully dynamic output dimensions are not supported "
-                           "for remote tensor. ",
-                           "Output: ",
-                           compiled_output);
+        else {
+            const auto name = compiled_output.get_any_name();
+            if (warned.emplace(name).second) {
+                slog::warn << "Benchmark App - NOT IMPLEMENTED - Fully dynamic output dimensions are not supported for "
+                              "remote tensor.  Output: "
+                           << compiled_output << slog::endl;
+            }
+            shape.push_back(static_cast<ov::Shape::value_type>(1));
+        }
     }
     return shape;
 }
 
 std::map<std::string, ov::Tensor> get_remote_output_tensors(const ov::CompiledModel& compiledModel,
-                                                            std::map<std::string, ::gpu::BufferType>& clBuffer) {
+                                                            std::map<std::string, ::gpu::BufferType>& clBuffer,
+                                                            const std::map<std::string, ov::Tensor>& reference, 
+                                                            bool useRefBuffer) {
 #ifdef HAVE_GPU_DEVICE_MEM_SUPPORT
     std::map<std::string, ov::Tensor> outputTensors;
     std::shared_ptr<const ov::Model> runtime_model = nullptr;
+    auto context = compiledModel.get_context();
+    auto& oclContext = static_cast<ov::intel_gpu::ocl::ClContext&>(context);
+    auto oclInstance = std::make_shared<OpenCL>(oclContext.get());
     for (auto& output : compiledModel.outputs()) {
-        auto context = compiledModel.get_context();
-        auto& oclContext = static_cast<ov::intel_gpu::ocl::ClContext&>(context);
-        auto oclInstance = std::make_shared<OpenCL>(oclContext.get());
+        const auto name = output.get_any_name();
         ov::Shape shape = get_static_shape(output);
+        if (const auto it = reference.find(name); it != reference.end()) {
+            if (useRefBuffer) {
+                outputTensors[name] = it->second;
+                continue;
+            }
+            if (output.get_partial_shape().is_dynamic()) {
+                shape = it->second.get_shape();
+            }
+        }
         cl_int err;
         auto elementsNum = shape_size(shape);
         auto inputSize = elementsNum * output.get_element_type().bitwidth() / 8;

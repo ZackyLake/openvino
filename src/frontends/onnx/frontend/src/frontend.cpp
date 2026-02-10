@@ -259,6 +259,27 @@ void FrontEnd::normalize(const std::shared_ptr<ov::Model>& model) const {
     manager.register_pass<ov::frontend::pass::SequenceConcatReplacer>();
     manager.register_pass<ov::pass::ResolveNameCollisions>(true);
     manager.run_passes(model);
+
+    static const auto inplacekv = []() {
+        const auto txt = std::getenv("inplacekv");
+        return txt && txt == std::string_view("true");
+    }();
+
+    if (inplacekv) {
+
+        std::vector<std::shared_ptr<ov::op::v0::Result>> removes;
+        for (const auto& out : model->get_results()) {
+            if (out->get_friendly_name().find("present") == 0) {
+                removes.push_back(out);
+            }
+        }
+            
+        for (const auto& out : removes) {
+            printf("InplaceKV remove output [%s]\n", out->get_friendly_name().c_str());
+            model->remove_result(out);
+        }
+
+    }
 }
 
 std::shared_ptr<ov::Model> FrontEnd::convert(const InputModel::Ptr& input_model) const {

@@ -46,6 +46,8 @@
 #include "transformations/rt_info/fused_names_attribute.hpp"
 #include "transformations/utils/utils.hpp"
 
+__declspec(dllimport) void PutMarker(std::string&& txt) noexcept;
+
 // Undef DEVICE_TYPE macro which can be defined somewhere in windows headers as DWORD and conflict with our metric
 #ifdef DEVICE_TYPE
 #undef DEVICE_TYPE
@@ -178,7 +180,9 @@ std::shared_ptr<ov::Model> Plugin::clone_and_transform_model(const std::shared_p
             set_weightless_cache_attributes(cloned_model);
     }
 
+    PutMarker("transform_model");
     transform_model(cloned_model, config_copy, context);
+    PutMarker("~transform_model");
 
     // Transformations for some reason may drop output tensor names, so here we copy those from the original model
     auto new_results = cloned_model->get_results();
@@ -248,6 +252,7 @@ Plugin::Plugin() {
 }
 
 std::shared_ptr<ov::ICompiledModel> Plugin::compile_model(const std::shared_ptr<const ov::Model>& model, const ov::AnyMap& orig_config) const {
+    PutMarker("compile_model");
     OV_ITT_SCOPED_TASK(itt::domains::intel_gpu_plugin, "Plugin::compile_model");
     std::string device_id = get_device_id(orig_config);
 
@@ -263,6 +268,7 @@ std::shared_ptr<ov::ICompiledModel> Plugin::compile_model(const std::shared_ptr<
     config.finalize(context.get(), transformed_model.get());
     {
         OV_ITT_SCOPED_TASK(itt::domains::intel_gpu_plugin, "Plugin::compile_model::CreateCompiledModel");
+        PutMarker("~compile_model");
         return std::make_shared<CompiledModel>(transformed_model, shared_from_this(), context, config);
     }
 }
@@ -386,7 +392,22 @@ std::shared_ptr<ov::ICompiledModel> Plugin::import_model(std::istream& model,
                                                          const ov::SoPtr<ov::IRemoteContext>& context,
                                                          const ov::AnyMap& orig_config) const {
     OV_ITT_SCOPED_TASK(itt::domains::intel_gpu_plugin, "Plugin::ImportNetwork");
-
+    struct Exiter
+    {
+        const std::chrono::high_resolution_clock::time_point Tbegin = std::chrono::high_resolution_clock::now();
+        Exiter()
+        {
+            PutMarker("import_model");
+        }
+        ~Exiter()  
+        {
+            const auto tend = std::chrono::high_resolution_clock::now();
+            printf("@@##Finish [import_model] in [%zu]ms\n", std::chrono::duration_cast<std::chrono::milliseconds>(tend - Tbegin).count());
+            PutMarker("~import_model");
+        }
+    };
+    Exiter dummy;
+    
     auto context_impl = get_context_impl(context);
     context_impl->initialize();
 

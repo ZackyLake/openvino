@@ -10,6 +10,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include <regex>
 
 // clang-format off
 #include "openvino/openvino.hpp"
@@ -1060,7 +1061,8 @@ int main(int argc, char* argv[]) {
         std::map<std::string, ov::TensorVector> inputsData;
         if (isFlagSetInCommandLine("use_device_mem")) {
             if (device_name.find("GPU") == 0) {
-                inputsData = ::gpu::get_remote_input_tensors(inputFiles,
+                auto cpuData = get_tensors(inputFiles, app_inputs_info);
+                inputsData = ::gpu::copy_remote_input_tensors(cpuData,
                                                              app_inputs_info,
                                                              compiledModel,
                                                              clInputsBuffer,
@@ -1138,6 +1140,21 @@ int main(int argc, char* argv[]) {
             slog::info << "Benchmarking in full mode (inputs filling are included in measurement loop)." << slog::endl;
         }
 
+        static const std::regex kv_regex(R"(^present_(key|value)(_\d+)$)");
+        std::map<std::string, ov::Tensor> kvtensors;
+        for (auto& output : compiledModel.outputs()) {
+            const auto name = output.get_any_name();
+            std::smatch match;
+            if (std::regex_match(name, match, kv_regex)) {
+                const auto past_name = "past_" + match[1].str() + match[2].str();
+                if (const auto it = inputsData.find(past_name); it != inputsData.end()) {
+                    slog::info << "KV matched [" << name << "]!" << slog::endl;
+                    kvtensors[name] = it->second[0];
+                }
+            }
+        }
+        const auto inplace_kv = isFlagSetInCommandLine("kv_inplace");
+
         // copy prepared data straight into inferRequest->getTensor()
         // for inference only mode
         if (inferenceOnly) {
@@ -1164,8 +1181,10 @@ int main(int argc, char* argv[]) {
                 }
 
                 if (useGpuMem) {
-                    auto outputTensors =
-                        ::gpu::get_remote_output_tensors(compiledModel, inferRequest->get_output_cl_buffer());
+                    auto outputTensors = ::gpu::get_remote_output_tensors(compiledModel,
+                                                                          inferRequest->get_output_cl_buffer(),
+                                                                          kvtensors,
+                                                                          inplace_kv);
                     for (auto& output : compiledModel.outputs()) {
                         inferRequest->set_tensor(output.get_any_name(), outputTensors[output.get_any_name()]);
                     }
@@ -1193,10 +1212,14 @@ int main(int argc, char* argv[]) {
                 }
 
                 if (useGpuMem) {
-                    auto outputTensors =
-                        ::gpu::get_remote_output_tensors(compiledModel, inferRequest->get_output_cl_buffer());
+                    auto outputTensors = ::gpu::get_remote_output_tensors(compiledModel,
+                                                                          inferRequest->get_output_cl_buffer(),
+                                                                          kvtensors,
+                                                                          inplace_kv);
                     for (auto& output : compiledModel.outputs()) {
-                        inferRequest->set_tensor(output.get_any_name(), outputTensors[output.get_any_name()]);
+                        const auto name = output.get_any_name();
+                        auto tensor = outputTensors[name];
+                        inferRequest->set_tensor(name, tensor);
                     }
                 }
             }
@@ -1238,7 +1261,7 @@ int main(int argc, char* argv[]) {
             }
 
             if (!inferenceOnly) {
-                auto inputs = app_inputs_info[iteration % app_inputs_info.size()];
+                auto inputs = app_inputs_info[app_inputs_info.size() > 1 ? 1 : 0];
 
                 if (FLAGS_pcseq) {
                     inferRequest->set_latency_group_id(iteration % app_inputs_info.size());
@@ -1250,13 +1273,15 @@ int main(int argc, char* argv[]) {
 
                 for (auto& item : inputs) {
                     auto inputName = item.first;
-                    const auto& data = inputsData.at(inputName)[iteration % inputsData.at(inputName).size()];
+                    const auto& data = inputsData.at(inputName)[inputsData.at(inputName).size() > 1 ? 1 : 0];
                     inferRequest->set_tensor(inputName, data);
                 }
 
                 if (useGpuMem) {
-                    auto outputTensors =
-                        ::gpu::get_remote_output_tensors(compiledModel, inferRequest->get_output_cl_buffer());
+                    auto outputTensors = ::gpu::get_remote_output_tensors(compiledModel,
+                                                                          inferRequest->get_output_cl_buffer(),
+                                                                          kvtensors,
+                                                                          inplace_kv);
                     for (auto& output : compiledModel.outputs()) {
                         inferRequest->set_tensor(output.get_any_name(), outputTensors[output.get_any_name()]);
                     }

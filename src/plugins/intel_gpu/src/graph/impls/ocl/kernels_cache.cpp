@@ -47,6 +47,8 @@
 #include "gpu/intel/gemm/jit/include/gemmstone/microkernel/fuser.hpp"
 #endif
 
+__declspec(dllimport) void PutMarker(std::string&& txt) noexcept;
+
 namespace {
 std::mutex cacheAccessMutex;
 
@@ -421,6 +423,8 @@ void kernels_cache::build_all() {
     if (!_pending_compilation)
         return;
 
+    PutMarker("ocl compile");
+
     std::vector<batch_program> batches;
     {
         std::lock_guard<std::mutex> lock(_mutex);
@@ -475,6 +479,8 @@ void kernels_cache::build_all() {
         malloc_trim(0);
 #endif
     }
+    
+    PutMarker("~ocl compile");
 }
 
 void kernels_cache::reset() {

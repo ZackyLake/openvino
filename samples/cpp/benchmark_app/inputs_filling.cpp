@@ -658,7 +658,13 @@ std::map<std::string, ov::TensorVector> get_tensors(std::map<std::string, std::v
     }
 
     if (!inputFiles.empty() && inputFiles.size() != app_inputs_info[0].size()) {
-        throw std::logic_error("Number of inputs specified in -i must be equal to number of model inputs!");
+        printf("Number of inputs specified in -i must be equal to number of model inputs!");
+        for (const auto& x : app_inputs_info[0]) {
+            if (inputFiles.find(x.first) == inputFiles.end()) {
+                inputFiles[x.first] = {"random"};
+            }
+        }
+        // throw std::logic_error("Number of inputs specified in -i must be equal to number of model inputs!");
     }
 
     // count image type inputs of network

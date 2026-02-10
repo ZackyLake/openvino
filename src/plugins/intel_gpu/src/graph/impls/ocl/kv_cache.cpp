@@ -633,7 +633,9 @@ struct kv_cache_impl : multi_stage_primitive<kv_cache> {
             auto scatter_kernel_params = get_scatter_kernel_params(impl_param, true);
             (_kernels_data[*scatter_update_stage].update_dispatch_data_func)(scatter_kernel_params, _kernels_data[*scatter_update_stage]);
             // Skip execution if indices tensor is empty
-            _kernels_data[*scatter_update_stage].kernels[0].skip_execution = impl_param.get_input_layout(3).count() == 0;
+            GPU_DEBUG_TRACE_DETAIL << impl_param.desc->id << " : update_dispatch_data of scatter_update: " << impl_param.get_input_layout(3) << std::endl;
+            for (auto& kernel :_kernels_data[*scatter_update_stage].kernels)
+                kernel.skip_execution = impl_param.get_input_layout(3).count() == 0;
         }
 
         // If model loaded from cache, params are not initialized, so we create a new object and reuse it in the future

@@ -9,6 +9,18 @@
 
 namespace cldnn {
 
+template <>
+struct typed_program_node<scatter_elements_update> : public typed_program_node_base<scatter_elements_update> {
+private:
+    using parent = typed_program_node_base<scatter_elements_update>;
+
+public:
+    using parent::parent;
+    program_node& input(std::size_t i = 0) const { return get_dependency(i); }
+
+    std::vector<size_t> get_shape_infer_dependencies() const override { return {0}; }
+};
+
 using scatter_elements_update_node = typed_program_node<scatter_elements_update>;
 
 template <>
@@ -18,8 +30,16 @@ class typed_primitive_inst<scatter_elements_update> : public typed_primitive_ins
 
 public:
     template<typename ShapeType>
-    static std::vector<layout> calc_output_layouts(scatter_elements_update_node const& /*node*/, const kernel_impl_params& impl_param) {
-        return forward_input0_shape<ShapeType>(impl_param);
+    static std::vector<layout> calc_output_layouts(scatter_elements_update_node const& node, const kernel_impl_params& impl_param) {
+        auto ret = forward_input0_shape<ShapeType>(impl_param);
+        // auto ret = impl_param.has_fused_primitives() ? forward_input0_shape<ShapeType>(impl_param) : std::vector<layout>{impl_param.input_layouts[0]};
+        if (ret[0] != impl_param.input_layouts[0]) {
+            printf("!!scatter-ele-update [%s] get layout change: [%s] -> [%s]\n",
+                   node.id().c_str(),
+                   impl_param.input_layouts[0].to_short_string().c_str(),
+                   ret[0].to_short_string().c_str());
+        }
+        return ret;
     }
 
     static layout calc_output_layout(scatter_elements_update_node const& node, kernel_impl_params const& impl_param);
@@ -27,6 +47,8 @@ public:
 
     typed_primitive_inst(network& network, scatter_elements_update_node const& desc);
     void update_output_memory() override;
+
+    bool is_inplace = false;
 
 private:
     void on_execute() override;

@@ -102,6 +102,11 @@ SyncInferRequest::SyncInferRequest(const std::shared_ptr<const CompiledModel>& c
 }
 
 void SyncInferRequest::infer() {
+    static const auto pausevar = std::getenv("cpstop");
+    if (pausevar && pausevar == std::string_view("true")) {
+        printf("pause at infer\n");
+        getchar();
+    }
     // String can be constructed once in the constructor
     OV_ITT_SCOPED_TASK_BASE(itt::domains::intel_gpu_inference,  m_itt_infer_request_str.c_str());
     setup_stream_graph();
@@ -283,7 +288,7 @@ void SyncInferRequest::enqueue() {
     m_internal_outputs.clear();
 
     auto network_enqueue_start = std::chrono::high_resolution_clock::now();
-    m_internal_outputs = network->execute(dependencies);
+    m_internal_outputs = network->execute(dependencies, true);
     auto network_enqueue_end = std::chrono::high_resolution_clock::now();
 
     [[maybe_unused]] const auto& config = network->get_config();

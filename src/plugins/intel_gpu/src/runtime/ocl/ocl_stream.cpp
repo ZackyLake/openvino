@@ -89,6 +89,16 @@ void set_arguments_impl(ocl_kernel_type& kernel,
         cl_int status = CL_INVALID_ARG_VALUE;
         switch (args[i].t) {
             case args_t::INPUT:
+                if (args[i].index >= data.inputs.size()) {
+                    std::cout << "kernel: " << kernel.get() << " set arg " << i << " oob! use " << args[i].index << " in " << data.inputs.size()
+                                           << std::endl;
+                } else if (!data.inputs[args[i].index]) {
+                    std::cout << "kernel: " << kernel.get() << " set arg " << i << " is null!" << std::endl;
+                    for (uint32_t j = 0; j < data.inputs.size(); j++) {
+                        std::cout << "inputs [" << j << "]: [" << static_cast<const void*>(data.inputs[j].get()) << 
+                            (j == args[i].index ? "](*)" : "]") << std::endl;
+                    }
+                }
                 OPENVINO_ASSERT(args[i].index < data.inputs.size() && data.inputs[args[i].index],
                                "The allocated input memory is necessary to set kernel arguments.");
                 status = set_kernel_arg(kernel, i, data.inputs[args[i].index]);

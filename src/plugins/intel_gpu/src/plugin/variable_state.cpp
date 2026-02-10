@@ -12,6 +12,7 @@
 #include "intel_gpu/runtime/layout.hpp"
 #include "intel_gpu/runtime/debug_configuration.hpp"
 #include <memory>
+#include <chrono>
 
 namespace ov::intel_gpu {
 
@@ -24,16 +25,21 @@ VariableState::VariableState(const VariableStateInfo& info, RemoteContextImpl::P
     , m_transpose_required(info.transpose_required)
     , m_initial_layout(info.m_layout) {
     update_device_buffer();
+    printf("==##init varstate [%s]\n", info.m_id.c_str());
 }
 
 void VariableState::reset() {
     m_is_set = false;
+    uint32_t cnt = 0;
     set_layout(m_initial_layout);
     for (auto& user : m_prim_inst) {
         if (const auto prim = user.lock(); prim) {
             prim->release_variable();
+            cnt++;
         }
     }
+    //printf("==##varstate reset! on [%u] prims\n", cnt);
+    //std::this_thread::sleep_for(std::chrono::milliseconds(100));
 }
 
 cldnn::memory::ptr VariableState::get_memory() const {

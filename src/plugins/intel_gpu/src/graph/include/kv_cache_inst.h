@@ -79,9 +79,15 @@ public:
     static int64_t get_max_pad(const layout& target_layout, size_t buffer_size, int64_t sequence_axis, std::string target_name = "") {
         if (buffer_size == 0)
             return 0;
+        int64_t sequence_element_size = 1;
+        const auto shape = target_layout.get_shape();
+        for (uint32_t i = 0; i < shape.size(); ++i) {
+            if (i != sequence_axis && shape[i] != 0) {
+                sequence_element_size *= shape[i];
+            }
+        }
         const size_t total_elements = target_layout.count();
         const int64_t concat_axis_size = target_layout.get_shape()[sequence_axis];
-        const int64_t sequence_element_size = total_elements / concat_axis_size;
         const int64_t max_sequence_elements = buffer_size / sequence_element_size;
         auto max_pad = std::max<int64_t>(max_sequence_elements - concat_axis_size, 0);
         auto target_layout_name = (target_name != "") ? target_name : "target_layout";

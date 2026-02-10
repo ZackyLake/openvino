@@ -366,6 +366,9 @@ public:
     std::shared_ptr<const PType> get_typed_desc() const { return _impl_params->typed_desc<PType>(); }
 
     virtual void update_output_memory() {}
+    void release_outputs();
+    void release_internal();
+    void restore_outputs();
 
     virtual int32_t get_prealloc_iter_num() { return -1; }
     virtual void update_shape_info_tensor(const kernel_impl_params& params);
@@ -441,6 +444,7 @@ protected:
     bool _can_share_internal_buffer = true;
     bool _is_constant = false;
     bool _needs_completion_event = false;
+    bool _output_released = false;
 
     std::vector<size_t> _max_output_layout_count;
     std::vector<size_t> _max_intermediates_memory_sizes;

@@ -151,13 +151,13 @@ public:
     const program::primitives_info& get_primitives_info() const;
     const program::graph_optimizer_info& get_optimizer_passes_info() const;
     std::map<primitive_id, primitive_id> get_ext_id_mapping() const;
-    void execute_impl(const std::vector<event::ptr>& events);
+    void execute_impl(const std::vector<event::ptr>& events, const bool doRelease = false);
 
     /// @brief Executes network and returns the list of @ref network_output.
     /// @param dependencies List of @ref event objects to be waited before network execution.
     /// @note User should call set_input_data() for every @ref input_layout defined in source @ref topology
     /// before network execution.
-    std::map<primitive_id, network_output> execute(const std::vector<event::ptr>& dependencies = {});
+    std::map<primitive_id, network_output> execute(const std::vector<event::ptr>& dependencies = {}, const bool doRelease = false);
 
     void validate_primitives();
     void preallocate_shape_info_buffers();
@@ -223,6 +223,7 @@ private:
     bool _is_dynamic = false;
     bool _enable_profiling = false;
     bool _reset_arguments;
+    bool _output_released = false;
     bool _reuse_variable_mem = false;
 
     /* Common memory pointer for shape_info */

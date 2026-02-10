@@ -486,7 +486,7 @@ std::vector<event::ptr> network::set_output_memory(const primitive_id& id, memor
             mem = eng.reinterpret_buffer(*mem_new, prim->output_memory().get_layout());
 
         ret_ev.push_back(prim->set_output_memory(mem, (!prim->is_dynamic() || !is_remote)));
-        if (!_reset_arguments &&
+        if (!_reset_arguments && !_output_released &&
             (prim->type() != cldnn::data::type_id() && !(prim->type() == cldnn::mutable_data::type_id() && prim->dependencies().empty()))) {
             prim->set_arguments();
         }
@@ -669,6 +669,63 @@ void network::reset_output_remote_memory_ptrs() {
     if (!_output_remote_mem_ptrs.empty()) {
         _output_remote_mem_ptrs.clear();
     }
+
+    static auto check_env = [](std::string_view key, bool def = false) -> bool {
+        const auto evar = std::getenv(key.data());
+        if (def)
+            return !evar || evar != std::string_view("false");
+        else
+            return evar && evar == std::string_view("true");
+    };
+    static const auto release_out = check_env("reout"), release_mid = check_env("remid"), logmem = check_env("logmem");
+    struct LogMem
+    {
+        std::map<std::string, std::pair<uint64_t, uint64_t>> memstat;
+        cldnn::engine& engine;
+        LogMem(cldnn::engine& engine_) : engine(engine_)
+        {
+            const auto before = engine.get_memory_statistics();
+            for (const auto& [k, v] : before) {
+                memstat[k] = {v, v};
+            }
+        }
+        ~LogMem() {
+            const auto cur = engine.get_memory_statistics();
+            for (const auto& [k, v] : cur) {
+                memstat[k].second = v;
+            }
+            for (const auto& [k, v] : memstat) {
+                const auto [before, after] = v;
+                const auto diff = before - after;
+                printf("--  [%12s] [%12zu] -> [%12zu] = [%10zu]\n", k.data(), before, after, diff);
+            }
+        }
+    };
+    {
+        std::optional<LogMem> memlogger;
+        if (logmem) {
+            printf("do release out[%c] mid[%c]\n", release_out ? 'Y' : 'N', release_mid ? 'Y' : 'N');
+            memlogger.emplace(_engine);
+        }
+        if (release_out || release_mid) {
+            static const auto flush = check_env("flashr", true);
+            if (flush)
+                get_stream().finish();
+            for (auto& inst : _exec_order) {
+                if (release_out) {
+                    inst->release_outputs();
+                }
+                if (release_mid) {
+                    inst->release_internal();
+                }
+            }
+            _output_released = true;
+        }
+    }
+    static const auto pausevar = check_env("cpstop");
+    if (pausevar) {
+        getchar();
+    }
 }
 
 void network::add_to_exec_order(const primitive_id& id) {
@@ -676,7 +733,7 @@ void network::add_to_exec_order(const primitive_id& id) {
     _exec_order.push_back(inst);
 }
 
-std::map<primitive_id, network_output> network::execute(const std::vector<event::ptr>& dependencies) {
+std::map<primitive_id, network_output> network::execute(const std::vector<event::ptr>& dependencies, const bool doRelease) {
     OV_ITT_SCOPED_TASK(ov::intel_gpu::itt::domains::intel_gpu_plugin, "NetworkImpl::Execute");
     NETWORK_DEBUG(*this);
 
@@ -723,7 +780,7 @@ std::map<primitive_id, network_output> network::execute(const std::vector<event:
     // in some cases.
     auto surf_lock = get_stream().create_surfaces_lock(in_out_mem);
 
-    execute_impl(dependencies);
+    execute_impl(dependencies, doRelease);
 
     std::map<primitive_id, network_output> result;
     for (auto& inst : _outputs) {
@@ -749,7 +806,13 @@ bool network::has_event(const primitive_id& id) const {
     return it->second->get_impl_params()->out_event != nullptr;
 }
 
-void network::execute_impl(const std::vector<event::ptr>& events) {
+void network::execute_impl(const std::vector<event::ptr>& events, [[maybe_unused]] const bool doRelease) {
+    if (_output_released) {
+        for (auto& inst : _exec_order) {
+            inst->restore_outputs();
+        }
+        _output_released = false;
+    }
     set_arguments();
 
     // This extra flush command is needed for dynamic models in both cases of out_of_order / in_order operating mode
