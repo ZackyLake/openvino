@@ -102,6 +102,15 @@ struct scatter_elements_update_impl : typed_primitive_impl_ocl<scatter_elements_
         update_shapes(*_kernel_data.params, impl_param);
         (_kernel_data.update_dispatch_data_func)(*_kernel_data.params, _kernel_data);
     }
+
+    event::ptr execute_impl(const std::vector<event::ptr>& event, scatter_elements_update_inst& instance) override {
+        const auto& prim_params = std::static_pointer_cast<kernel_params_t>(_kernel_data.params);
+        if (prim_params->is_inplace != instance.is_inplace) {
+            prim_params->is_inplace = instance.is_inplace;
+            (_kernel_data.update_dispatch_data_func)(*_kernel_data.params, _kernel_data);
+        }
+        return parent::execute_impl(event, instance);
+    }
 };
 
 std::unique_ptr<primitive_impl> ScatterElementsUpdateImplementationManager::create_impl(const program_node& node, const kernel_impl_params& params) const {

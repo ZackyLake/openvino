@@ -981,6 +981,26 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
         }
     }
 
+    static const auto inplacekv = []() {
+        const auto txt = std::getenv("inplacekv");
+        return txt && txt == std::string_view("true");
+    }();
+
+    if (inplacekv && get_node().is_type<scatter_elements_update>() && actual_layouts[0] == _impl_params->get_input_layout(0)) {
+        GPU_DEBUG_TRACE_DETAIL << id() << ": try make scatter_elements_update inplace" << std::endl;
+        //getchar();
+        if (!_outputs[0]) {
+            GPU_DEBUG_TRACE_DETAIL << id() << ": make output[" << _impl_params->get_output_layout(0).to_short_string() << "] be input["
+                                   << _impl_params->get_input_layout(0).to_short_string() << "]" << std::endl;
+            _outputs[0] = input_memory_ptr(0);
+            _max_output_layout_count[0] = _outputs[0]->count();
+
+        } else {
+            GPU_DEBUG_TRACE_DETAIL << id() << ": has output[" << _outputs[0]->buffer_ptr() << "] and input[" << input_memory_ptr(0)->buffer_ptr() << "]"
+                                   << std::endl;
+        }
+    }
+
     // update layout to ensure that it respects paddings for correct allocation size
     if (_node_output_layout.data_padding.is_dynamic()) {
         auto update_padding = [](layout& orig_layout) {
@@ -1754,6 +1774,9 @@ void primitive_inst::do_runtime_in_place_concat() {
         concat_inst->set_can_be_optimized(false);
         return;
     }
+
+    GPU_DEBUG_TRACE_DETAIL << "[In place concat] Evaluate [" << id() << "] with concat[" << concat_inst->id() << "]" << std::endl;
+
     // Currently does not support cascaded concats
     std::vector<primitive_inst*> concat_preds;
     for (auto pred : concat_inst->_deps) {

@@ -52,8 +52,9 @@ void GroupQueryAttention::validate_and_infer_types() {
                           "GroupQueryAttention only suuports f32 and f16");
 
     set_output_type(0, element_type, PartialShape{batch_size, sequence_len, head_size * m_num_heads});
+    const auto& kv_type = get_input_element_type(3);
     for (auto&& port : {1, 2}) {
-        set_output_type(port, element_type, kv_shape);
+        set_output_type(port, kv_type, kv_shape);
     }
 }
 

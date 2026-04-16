@@ -9,6 +9,18 @@
 
 namespace cldnn {
 
+template <>
+struct typed_program_node<scatter_elements_update> : public typed_program_node_base<scatter_elements_update> {
+private:
+    using parent = typed_program_node_base<scatter_elements_update>;
+
+public:
+    using parent::parent;
+    program_node& input(std::size_t i = 0) const { return get_dependency(i); }
+
+    std::vector<size_t> get_shape_infer_dependencies() const override { return {0}; }
+};
+
 using scatter_elements_update_node = typed_program_node<scatter_elements_update>;
 
 template <>
@@ -27,6 +39,8 @@ public:
 
     typed_primitive_inst(network& network, scatter_elements_update_node const& desc);
     void update_output_memory() override;
+
+    bool is_inplace = false;
 
 private:
     void on_execute() override;

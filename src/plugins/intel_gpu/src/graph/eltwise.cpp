@@ -414,15 +414,14 @@ eltwise_inst::typed_primitive_inst(network& network, eltwise_node const& node) :
                 base_pshape.size() < input_pshape.size()) {
                 base_pshape.insert(base_pshape.begin(), input_pshape.size() - base_pshape.size(), 1);
             }
-
+            std::string msg = "input " + std::to_string(i) + " :[" + input_pshape.to_string() + "] vs 0[" + base_pshape.to_string() + "]";
             for (size_t d = 0; d < base_pshape.size(); ++d) {
                 bool sizes_equal = base_pshape[d] == input_pshape[d];
                 bool broadcast =
                     (base_pshape[d] == 1 || input_pshape[d] == 1) && (base_pshape[d] != 1 || input_pshape[d] != 1);
                 CLDNN_ERROR_BOOL(node.id(),
                                  "Sizes equal or broadcast is possible",
-                                 !(sizes_equal || broadcast),
-                                 "Invalid input shapes");
+                                 !(sizes_equal || broadcast), "Invalid input shapes " + msg);
             }
         }
     }

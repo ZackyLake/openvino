@@ -33,6 +33,7 @@ int64_t kv_cache_inst::compute_trim_length(const kernel_impl_params& impl_param,
 
     const auto& past_seq_len_mem = mem_dep_it->second;
     const auto past_seq_len_layout = past_seq_len_mem->get_layout();
+    GPU_DEBUG_TRACE_DETAIL << desc.id << " : compute_trim_length: past_seq_len " << past_seq_len_layout << std::endl;
     if (past_seq_len_layout.count() == 0)
         return 0;
 
@@ -40,6 +41,7 @@ int64_t kv_cache_inst::compute_trim_length(const kernel_impl_params& impl_param,
     cldnn::mem_lock<uint8_t, mem_lock_type::read> past_seq_len_mem_lock(past_seq_len_mem, impl_param.get_stream());
     auto past_seq_len_tensor = make_tensor(past_seq_len_layout, past_seq_len_mem_lock.data());
     const auto past_dim_updated = ov::get_tensor_data_as<int64_t>(past_seq_len_tensor);
+    GPU_DEBUG_TRACE_DETAIL << desc.id << " : compute_trim_length: past_dim_updated = " << past_dim_updated[0] << std::endl;
 
     const auto& past_layout = impl_param.get_input_layout(0);
     const auto past_shape = past_layout.get_partial_shape();
@@ -47,8 +49,10 @@ int64_t kv_cache_inst::compute_trim_length(const kernel_impl_params& impl_param,
     OPENVINO_ASSERT(sequence_axis >= 0);
     const auto sequence_axis_idx = static_cast<size_t>(sequence_axis);
     OPENVINO_ASSERT(past_shape[sequence_axis_idx].is_static());
+    GPU_DEBUG_TRACE_DETAIL << desc.id << " : compute_trim_length: past_shape " << past_shape << " at " << sequence_axis_idx << std::endl;
 
     const auto trim_length = past_shape[sequence_axis_idx].get_length() - past_dim_updated[0];
+    GPU_DEBUG_TRACE_DETAIL << desc.id << " : compute_trim_length: trim_length = " << trim_length << std::endl;
     OPENVINO_ASSERT(trim_length >= 0, "[GPU] past_seq_len shouldn't exceed stored sequence length");
 
     return trim_length;

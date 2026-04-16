@@ -188,6 +188,10 @@ static const char infer_threads_pinning_message[] = "Optional. Explicit threads-
 static const char use_device_mem_message[] =
     "Optional. Switch between host and device memory allocation for input and output buffers.";
 
+// @brief message for inplace kv option
+static const char kv_inplace_message[] =
+    "Optional. Use input(past_kv) for output(present_kv) buffers.";
+
 /// @brief message for latency percentile settings
 static const char infer_latency_percentile_message[] =
     "Optional. Defines the percentile to be reported in latency metric. The valid range is [1, 100]. The default value "
@@ -353,6 +357,9 @@ DEFINE_string(pin, "", infer_threads_pinning_message);
 
 /// @brief Define flag for switching between host and device memory allocation for input and output buffers
 DEFINE_bool(use_device_mem, false, use_device_mem_message);
+
+/// @brief Define flag for inplace kv option
+DEFINE_bool(kv_inplace, false, kv_inplace_message);
 
 /// @brief The percentile which will be reported in latency metric
 DEFINE_uint64(latency_percentile, 50, infer_latency_percentile_message);

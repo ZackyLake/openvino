@@ -29,10 +29,20 @@
 #include "openvino/pass/pattern/op/or.hpp"
 #include "openvino/pass/pattern/op/pattern.hpp"
 #include "openvino/pass/pattern/op/wrap_type.hpp"
+#include "openvino/util/common_util.hpp"
 #include "transformations/utils/utils.hpp"
 
 using namespace ov::pass::pattern;
 using ov::pass::pattern::op::Or;
+
+
+static bool CheckFC3() {
+    static const auto fc3 = []() {
+        const auto txt = std::getenv("fc3");
+        return !(txt && txt == std::string_view("false"));
+    }();
+    return fc3;
+}
 
 ov::pass::ConvertWeightCompressedConv1x1ToMatmul::ConvertWeightCompressedConv1x1ToMatmul() {
     MATCHER_SCOPE(ConvertWeightCompressedConv1x1ToMatmul);
@@ -109,6 +119,37 @@ ov::pass::ConvertWeightCompressedConv1x1ToMatmul::ConvertWeightCompressedConv1x1
         auto scale = pattern_map.at(weights_scales_m).get_node_shared_ptr();
         auto zp = (pattern_map.count(weights_zp_m) > 0) ? pattern_map.at(weights_zp_m).get_node_shared_ptr() : nullptr;
         auto activation = pattern_map.at(first_input_m).get_node_shared_ptr();
+
+        const auto ensure_transpose_order = [](const std::shared_ptr<ov::op::v0::Constant>& order_node,
+                                               const std::array<size_t, 3>& order_offset) {
+            OPENVINO_ASSERT(order_node);
+            const auto order_data = order_node->cast_vector<int64_t>();
+            const auto order_rank = order_data.size();
+            OPENVINO_ASSERT(order_rank >= 3);  // to make an input to conv2/3d, rank should be at least 3
+            // 0,3,1,2
+            if (order_data[order_rank - 3] != static_cast<int64_t>(order_rank - order_offset[0]) ||
+                order_data[order_rank - 2] != static_cast<int64_t>(order_rank - order_offset[1]) ||
+                order_data[order_rank - 1] != static_cast<int64_t>(order_rank - order_offset[2])) {
+                return false;
+            }
+            return true;
+        };
+        if (pattern_map.count(transpose_activations_m) > 0) {
+            const auto act_order =
+                ov::as_type_ptr<ov::op::v0::Constant>(pattern_map.at(a_order_m).get_node_shared_ptr());
+            // expects NHWC -> NCHW transpose on activation, 4 - [0,3,1,2]
+            if (!ensure_transpose_order(act_order, {1, 3, 2})) {
+                return false;
+            }
+        }
+        if (pattern_map.count(transpose_output_m) > 0) {
+            const auto out_order =
+                ov::as_type_ptr<ov::op::v0::Constant>(pattern_map.at(c_order_m).get_node_shared_ptr());
+            // expects NCHW -> NHWC transpose on result, 4 - [0,2,3,1]
+            if (!ensure_transpose_order(out_order, {2, 1, 3})) {
+                return false;
+            }
+        }
 
         auto reshape_const_to_2d = [](std::shared_ptr<ov::Node> node) {
             auto constant = ov::as_type_ptr<ov::op::v0::Constant>(node);
@@ -233,6 +274,24 @@ ov::pass::ConvertWeightCompressedConv1x1ToMatmul::ConvertWeightCompressedConv1x1
             }
         }
 
+        // If the activation has a static leading dimension of 1, squeeze it.
+        // This is done to allow pre-selection of OCL implementations for non-IMMAD devices, reducing memory pressure.
+        bool squeeze_activation = false;
+
+        if (CheckFC3() && activation->get_output_partial_shape(0)[0].is_static() &&
+            activation->get_output_partial_shape(0)[0] == 1) {
+            squeeze_activation = true;
+            auto shape_out = activation->get_output_partial_shape(0);
+            auto squeeze_const =
+                std::make_shared<ov::op::v0::Constant>(ov::element::i64,
+                                                       ov::Shape{3},
+                                                       std::vector<int64_t>{1, -1, shape_out[-1].get_length()});
+            auto squeeze = std::make_shared<ov::op::v1::Reshape>(activation, squeeze_const, false);
+            ov::copy_runtime_info(activation, squeeze);
+            squeeze->set_friendly_name(activation->get_friendly_name() + "_squeeze");
+            activation = squeeze;
+        }
+
         auto matmul = std::make_shared<ov::op::v0::MatMul>(activation, scaled_weight, false, true);
         ov::copy_runtime_info(conv1x1, matmul);
         std::shared_ptr<Node> matmul_out;
@@ -258,36 +317,100 @@ ov::pass::ConvertWeightCompressedConv1x1ToMatmul::ConvertWeightCompressedConv1x1
             matmul_out = matmul;
         }
 
+        if (convert_out) {
+            matmul_out = convert_out->clone_with_new_inputs({matmul_out});
+            ov::copy_runtime_info(convert_out, matmul_out);
+        }
+
+        if (squeeze_activation) {
+            auto shape_out = matmul_out->get_output_partial_shape(0);
+            auto unsqueeze_const =
+                std::make_shared<ov::op::v0::Constant>(ov::element::i64,
+                                                       ov::Shape{4},
+                                                       std::vector<int64_t>{1, 1, -1, shape_out[-1].get_length()});
+            auto unsqueeze = std::make_shared<ov::op::v1::Reshape>(matmul_out, unsqueeze_const, false);
+            ov::copy_runtime_info(matmul_out, unsqueeze);
+            unsqueeze->set_friendly_name(matmul_out->get_friendly_name() + "_unsqueeze");
+            matmul_out = unsqueeze;
+        }
+        printf("conv1x1->matmul here [%s]. squeeze[%c]\n",
+               conv1x1->get_friendly_name().c_str(),
+               squeeze_activation ? 'Y' : 'N');
+
         if (reshape_out) {
-            if (convert_out) {
-                auto convert_final = convert_out->clone_with_new_inputs({matmul_out});
-                auto reshape_final = reshape_out->clone_with_new_inputs({convert_final, out_order});
-                reshape_final->set_friendly_name(m.get_match_root()->get_friendly_name());
-                ov::copy_runtime_info(convert_out, convert_final);
-                ov::copy_runtime_info(m.get_matched_nodes(), reshape_final);
-                ov::replace_node(m.get_match_root(), reshape_final);
-            } else {
-                auto reshape_final = reshape_out->clone_with_new_inputs({matmul_out, out_order});
-                reshape_final->set_friendly_name(m.get_match_root()->get_friendly_name());
-                ov::copy_runtime_info(m.get_matched_nodes(), reshape_final);
-                ov::replace_node(m.get_match_root(), reshape_final);
-            }
+            auto reshape_final = reshape_out->clone_with_new_inputs({matmul_out, out_order});
+            reshape_final->set_friendly_name(m.get_match_root()->get_friendly_name());
+            ov::copy_runtime_info(m.get_matched_nodes(), reshape_final);
+            ov::replace_node(m.get_match_root(), reshape_final);
         } else {
-            if (convert_out) {
-                auto convert_final = convert_out->clone_with_new_inputs({matmul_out});
-                convert_final->set_friendly_name(m.get_match_root()->get_friendly_name());
-                ov::copy_runtime_info(m.get_matched_nodes(), convert_final);
-                ov::replace_node(m.get_match_root(), convert_final);
-            } else {
-                matmul_out->set_friendly_name(m.get_match_root()->get_friendly_name());
-                ov::copy_runtime_info(m.get_matched_nodes(), matmul_out);
-                ov::replace_node(m.get_match_root(), matmul_out);
-            }
+            matmul_out->set_friendly_name(m.get_match_root()->get_friendly_name());
+            ov::copy_runtime_info(m.get_matched_nodes(), matmul_out);
+            ov::replace_node(m.get_match_root(), matmul_out);
         }
 
         return true;
     };
 
     auto m = std::make_shared<ov::pass::pattern::Matcher>(output_m, matcher_name);
+    this->register_matcher(m, callback);
+}
+
+
+
+ov::pass::RewireMatMulDim3::RewireMatMulDim3() {
+    MATCHER_SCOPE(RewireMatMulDim3);
+    if (!CheckFC3())
+        return;
+
+    auto matmul = ov::pass::pattern::wrap_type<ov::op::v0::MatMul>(
+        {ov::pass::pattern::any_input(), ov::pass::pattern::any_input()});
+    auto matmul_convert = ov::pass::pattern::wrap_type<ov::op::v0::Convert>({matmul});
+    auto matmul_reshape = ov::pass::pattern::wrap_type<ov::op::v1::Reshape>(
+        {matmul_convert, ov::pass::pattern::wrap_type<ov::op::v0::Constant>()});
+    auto prev = ov::pass::pattern::any_input();
+    auto prev_reshape =
+        ov::pass::pattern::wrap_type<ov::op::v1::Reshape>({prev, ov::pass::pattern::wrap_type<ov::op::v0::Constant>()});
+    auto matmul_add = ov::pass::pattern::wrap_type<ov::op::v1::Add>({prev_reshape, matmul_reshape});
+
+    ov::matcher_pass_callback callback = [OV_CAPTURE_CPY_AND_THIS](Matcher& m) {
+        const auto& pattern_map = m.get_pattern_value_map();
+        auto orig_add = ov::as_type_ptr<ov::op::v1::Add>(pattern_map.at(matmul_add).get_node_shared_ptr());
+        auto orig_prev = pattern_map.at(prev).get_node_shared_ptr();
+        auto orig_mmcvt = ov::as_type_ptr<ov::op::v0::Convert>(pattern_map.at(matmul_convert).get_node_shared_ptr());
+        auto orig_mmreshape =
+            ov::as_type_ptr<ov::op::v1::Reshape>(pattern_map.at(matmul_reshape).get_node_shared_ptr());
+        auto orig_mm = pattern_map.at(matmul).get_node_shared_ptr();
+
+        bool pass = true;
+        if (orig_add->get_output_partial_shape(0).size() == 4 && orig_prev->get_output_partial_shape(0).size() == 3 &&
+            orig_mmcvt->get_output_partial_shape(0).size() == 3)
+            pass = true;
+        else
+            pass = false;
+
+        printf("RewireMatMulDim3 [%c] on [%s](%s) with [%s](%s) & [%s](%s)\n",
+               pass ? 'Y' : 'N',
+               orig_add->get_friendly_name().c_str(),
+               orig_add->get_output_partial_shape(0).to_string().c_str(),
+               orig_prev->get_friendly_name().c_str(),
+               orig_prev->get_output_partial_shape(0).to_string().c_str(),
+               orig_mm->get_friendly_name().c_str(),
+               orig_mmcvt->get_output_partial_shape(0).to_string().c_str()
+        );
+        if (!pass)
+            return false;
+
+        auto new_add = std::make_shared<ov::op::v1::Add>(orig_prev, orig_mmcvt);
+        new_add->set_friendly_name(orig_add->get_friendly_name() + "_dim3");
+        ov::copy_runtime_info(orig_add, new_add);
+        auto new_reshape =
+            orig_mmreshape->clone_with_new_inputs({new_add, orig_mmreshape->get_input_node_shared_ptr(1)});
+        new_reshape->set_friendly_name(m.get_match_root()->get_friendly_name());
+        ov::copy_runtime_info(m.get_matched_nodes(), new_reshape);
+        ov::replace_node(m.get_match_root(), new_reshape);
+        return true;
+    };
+
+    auto m = std::make_shared<ov::pass::pattern::Matcher>(matmul_add, matcher_name);
     this->register_matcher(m, callback);
 }
