@@ -243,7 +243,16 @@ void ov::Model::validate_nodes_and_infer_types() const {
     std::unordered_set<const ov::descriptor::Tensor*> tensors;
 
     for (auto& node : get_ordered_ops()) {
+        const auto old = node->get_output_element_type(0);
         node->revalidate_and_infer_types();
+        const auto cur = node->get_output_element_type(0);
+        if (cur != old) {
+            printf("[%s] changed after revalidate! [%s] -> [%s]\n",
+                   node->get_friendly_name().c_str(),
+                   old.c_type_string().c_str(),
+                   cur.c_type_string().c_str());
+            getchar();
+        }
         for (const auto& output : node->outputs()) {
             const auto& tensor = output.get_tensor();
             // Skip results outputs tensors because result_input_tensor == result_output_tensor

@@ -328,7 +328,7 @@ bool LowPrecision::isFunctionQuantized(const std::shared_ptr<const ov::Model>& m
         if (check_fake_convert && ov::is_type<ov::op::v13::FakeConvert>(node)) {
             return true;
         } else if (const auto fakeQuantize = ov::as_type_ptr<ov::opset1::FakeQuantize>(node)) {
-            if (QuantizationDetails::outputLayoutIsSupported(fakeQuantize, true) &&
+            if (QuantizationDetails::outputLayoutIsSupported(fakeQuantize, true, true) &&
                 QuantizationDetails::isSupportedLevel(fakeQuantize->get_levels(), supported_levels)) {
                 return true;
             }

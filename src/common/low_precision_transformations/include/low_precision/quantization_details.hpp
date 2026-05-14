@@ -46,7 +46,7 @@ public:
             const std::vector<float>& outputLowValues,
             const std::vector<float>& outputHighValues);
 
-    static bool outputLayoutIsSupported(std::shared_ptr<ov::opset1::FakeQuantize> quantize, bool isConvertExpected = false);
+    static bool outputLayoutIsSupported(std::shared_ptr<ov::opset1::FakeQuantize> quantize, bool isConvertExpected = false, bool isReshapeExpected = false);
 
     static void getInputIntervals(
             std::shared_ptr<ov::opset1::FakeQuantize> quantize,

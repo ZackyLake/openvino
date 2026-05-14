@@ -35,11 +35,11 @@ std::ostream& write_all_to_stream(std::ostream& str, TS&&... args) {
         constexpr auto fwd_or_str =
             [](auto&& arg) -> std::conditional_t<std::is_same_v<std::filesystem::path, std::decay_t<decltype(arg)>>,
                                                  decltype(stringify(arg)),
-                                                 decltype(arg)&> {
+                                                 decltype(arg)> {
             if constexpr (std::is_same_v<std::filesystem::path, std::decay_t<decltype(arg)>>) {
                 return stringify(arg);
             } else {
-                return arg;
+                return std::forward<decltype(arg)>(arg);
             }
         };
         return (str << ... << (fwd_or_str(std::forward<TS>(args))));
