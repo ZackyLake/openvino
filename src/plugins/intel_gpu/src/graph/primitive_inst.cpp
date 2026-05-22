@@ -1066,6 +1066,19 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
             }
         }
     }
+    if (is_output() && get_node().is_type<reorder>()) {
+        if (inplacekv) {
+            auto* ext_block = get_network().get_output_memory_block(id());
+            GPU_DEBUG_TRACE_DETAIL << id() << ": has output[" << _outputs[0]->buffer_ptr() << "] and input[" << input_memory_ptr(0)->buffer_ptr()
+                                   << "] and extblock[" << (ext_block ? ext_block->rawPtr() : nullptr) << "]" << std::endl;
+            if (!_outputs[0] || _network.get_engine().is_the_same_buffer(output_memory(), input_memory())) {
+                _outputs[0] = get_network().get_engine().reinterpret_buffer(input_memory(0), actual_layouts[0]);
+                GPU_DEBUG_TRACE_DETAIL << id() << ": inplace reinterpret output into [" << _outputs[0]->get_layout() << "]" << std::endl;
+                set_flag(ExecutionFlags::SKIP);
+                return;
+            }
+        }
+    }
 
     // update layout to ensure that it respects paddings for correct allocation size
     if (_node_output_layout.data_padding.is_dynamic()) {

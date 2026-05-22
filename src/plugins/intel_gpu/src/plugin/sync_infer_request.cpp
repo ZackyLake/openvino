@@ -645,8 +645,11 @@ TensorWrapper SyncInferRequest::create_or_share_device_tensor(const TensorWrappe
                      && !generic_remote_tensor;
 
     if (usm_host_tensor && can_share && m_context == usm_host_tensor->get_impl()->get_context()) {
+        GPU_DEBUG_LOG << "device_tensor: [" << name << "] is USMHostTensor: " << (user_tensor_wrapper.owner == TensorOwner::PLUGIN ? "PLUGIN" : "USER")
+                      << std::endl;
         return { usm_host_tensor->get_impl(), user_tensor_wrapper.owner };
     } else if (usm_host_raw_ptr && can_share) {
+        GPU_DEBUG_LOG << "device_tensor: [" << name << "] is USM: " << user_tensor_mem_type << "(" << user_tensor->get_shape() << ")" << std::endl;
         return { std::make_shared<RemoteTensorImpl>(m_context,
                                                     user_tensor->get_shape(),
                                                     ::data_type_for_remote_tensor(element_type),
@@ -660,9 +663,13 @@ TensorWrapper SyncInferRequest::create_or_share_device_tensor(const TensorWrappe
                                                                 element_type,
                                                                 cldnn::format::get_default_format(tensor_shape.size())),
                                             *m_shape_predictor);
+        GPU_DEBUG_LOG << "predict shape: [" << name << "]: " << actual_memory_shape << " tensor(" << tensor_shape << ") port(" << port_pshape << ")"
+                      << std::endl;
     }
 
-    return { create_device_tensor(actual_memory_shape, element_type, need_lockable_mem), TensorOwner::PLUGIN };
+    auto dst_tensor = create_device_tensor(actual_memory_shape, element_type, need_lockable_mem);
+    GPU_DEBUG_LOG << "device_tensor: [" << name << "] create: " << dst_tensor->data() << " from " << user_tensor_wrapper.ptr->data() << std::endl;
+    return {dst_tensor, TensorOwner::PLUGIN};
 }
 
 cldnn::event::ptr SyncInferRequest::copy_output_data(cldnn::memory::ptr src, ov::ITensor& dst) const {
@@ -1059,18 +1066,37 @@ std::vector<cldnn::event::ptr> SyncInferRequest::prepare_output(size_t output_id
         m_plugin_outputs[output_idx] = user_tensor_wrapper;
     }
 
-    if (!is_dynamic) {
+    {
         bool need_lockable_mem = network->does_node_need_lockable_output(internal_name);
         bool has_device_buffer = m_plugin_outputs.count(output_idx) > 0;
         bool update_device_tensor = !has_device_buffer ||
                                     is_generic_remote ||
                                     (m_plugin_outputs[output_idx].owner == TensorOwner::USER && !is_remote_tensor_impl);
         if (update_device_tensor) {
-            if (!is_remote_tensor_impl) {
-                m_plugin_outputs[output_idx] =
-                    create_or_share_device_tensor(user_tensor_wrapper, internal_name, pshape, device_tensor_et, need_lockable_mem || convert_needed);
+            if (!is_dynamic) {
+                if (!is_remote_tensor_impl) {
+                    m_plugin_outputs[output_idx] =
+                        create_or_share_device_tensor(user_tensor_wrapper, internal_name, pshape, device_tensor_et, need_lockable_mem || convert_needed);
+                } else {
+                    m_plugin_outputs[output_idx] = { create_device_tensor(pshape, device_tensor_et, need_lockable_mem || convert_needed), TensorOwner::PLUGIN };
+                }
             } else {
-                m_plugin_outputs[output_idx] = { create_device_tensor(pshape, device_tensor_et, need_lockable_mem || convert_needed), TensorOwner::PLUGIN };
+                auto& engine = m_graph->get_engine();
+                auto user_tensor_mem_type = !is_remote_tensor_impl ? engine.detect_usm_allocation_type(user_tensor->data()) : cldnn::allocation_type::unknown;
+                auto usm_host_raw_ptr =
+                    engine.get_device_info().dev_type == cldnn::device_type::integrated_gpu && user_tensor_mem_type == cldnn::allocation_type::usm_host;
+                if (usm_host_raw_ptr) {
+                    GPU_DEBUG_LOG << "set zero-copy output tensor: [" << internal_name << "] with USM: " << user_tensor_mem_type << "("
+                                  << user_tensor->get_shape() << ")" << std::endl;
+                    m_plugin_outputs[output_idx] = {std::make_shared<RemoteTensorImpl>(m_context,
+                                                                                       user_tensor->get_shape(),
+                                                                                       ::data_type_for_remote_tensor(element_type),
+                                                                                       TensorType::BT_USM_SHARED,
+                                                                                       user_tensor->data()),
+                                                    TensorOwner::USER};
+                    auto block_it = m_output_memory_blocks.find(output_idx);
+                    network->register_output_memory_block(internal_name, block_it->second.get());
+                }
             }
         }
     }
