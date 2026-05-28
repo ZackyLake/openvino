@@ -1045,7 +1045,7 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
 
     static const auto inplacekv = []() {
         const auto txt = std::getenv("inplacekv");
-        return txt && txt == std::string_view("true");
+        return !(txt && txt == std::string_view("false"));
     }();
 
     if (get_node().is_type<scatter_elements_update>() || get_node().is_type<scatter_update>()) {
@@ -1072,6 +1072,9 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
             GPU_DEBUG_TRACE_DETAIL << id() << ": has output[" << _outputs[0]->buffer_ptr() << "] and input[" << input_memory_ptr(0)->buffer_ptr()
                                    << "] and extblock[" << (ext_block ? ext_block->rawPtr() : nullptr) << "]" << std::endl;
             if (!_outputs[0] || _network.get_engine().is_the_same_buffer(output_memory(), input_memory())) {
+                //if (!_outputs[0]) {
+                //    _outputs[0] = input_memory_ptr(0);
+                //}
                 _outputs[0] = get_network().get_engine().reinterpret_buffer(input_memory(0), actual_layouts[0]);
                 GPU_DEBUG_TRACE_DETAIL << id() << ": inplace reinterpret output into [" << _outputs[0]->get_layout() << "]" << std::endl;
                 set_flag(ExecutionFlags::SKIP);

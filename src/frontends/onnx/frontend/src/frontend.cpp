@@ -275,12 +275,12 @@ void FrontEnd::normalize(const std::shared_ptr<ov::Model>& model) const {
 
     static const auto inplacekv = []() {
         const auto txt = std::getenv("inplacekv");
-        return txt && txt == std::string_view("true");
+        return !(txt && txt == std::string_view("false"));
     }();
     
     static const auto keepkvout = []() {
         const auto txt = std::getenv("keepkvout");
-        return txt && txt == std::string_view("true");
+        return !(txt && txt == std::string_view("false"));
     }();
 
     if (inplacekv && !keepkvout) {

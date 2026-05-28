@@ -73,7 +73,7 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
     std::shared_ptr<ov::op::internal::GroupQueryAttention> node) {
     static const auto inplacekv = []() {
         const auto txt = std::getenv("inplacekv");
-        return txt && txt == std::string_view("true");
+        return !(txt && txt == std::string_view("false"));
     }();
 
     const auto num_heads = node->get_num_heads();
@@ -278,21 +278,14 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
         //                                                  std::vector<int64_t>{1, 1, 0, 1},
         //                                                  std::vector<int64_t>{1, 1, 0, 1});
 
-        static const auto noreorder = std::getenv("noreorder");
-        if (noreorder && std::string("true") == noreorder) {
-            const auto key_shape = register_new_node<v3::ShapeOf>(past_key);
-            const auto past_len = get_dimensions(key_shape, {2});
-            concat_kv_len = register_new_node<v1::Add>(past_len, current_seqlen);
+        if (hack > 0) {
+            past_key = register_new_node<v8::Slice>(past_key, zero, fixed_past, one, two);
+            past_value = register_new_node<v8::Slice>(past_value, zero, fixed_past, one, two);
+            concat_kv_len = fixed_now;
         } else {
-            if (hack > 0) {
-                past_key = register_new_node<v8::Slice>(past_key, zero, fixed_past, one, two);
-                past_value = register_new_node<v8::Slice>(past_value, zero, fixed_past, one, two);
-                concat_kv_len = fixed_now;
-            } else {
-                past_key = register_new_node<v8::Slice>(past_key, zero, past_seqlen, one, two);
-                past_value = register_new_node<v8::Slice>(past_value, zero, past_seqlen, one, two);
-                concat_kv_len = seqlens_1d;
-            }
+            past_key = register_new_node<v8::Slice>(past_key, zero, past_seqlen, one, two);
+            past_value = register_new_node<v8::Slice>(past_value, zero, past_seqlen, one, two);
+            concat_kv_len = seqlens_1d;
         }
         // concat_kv_len = register_new_node<v1::Add>(past_seqlen, current_seqlen);
     }
@@ -310,7 +303,7 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
 
     static const auto qknobcast = []() {
         const auto txt = std::getenv("qknobcast");
-        return txt && txt == std::string_view("true");
+        return !(txt && txt == std::string_view("false"));
     }();
     // Broadcast KV if grouped query attention
     const size_t kv_num_heads_factor = num_heads / kv_num_heads;

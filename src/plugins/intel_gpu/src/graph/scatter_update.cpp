@@ -60,7 +60,7 @@ void scatter_update_inst::on_execute() {
 void scatter_update_inst::update_output_memory() {
      static const auto inplacekv = []() {
         const auto txt = std::getenv("inplacekv");
-        return txt && txt == std::string_view("true");
+        return !(txt && txt == std::string_view("false"));
     }();
 
     if ((!inplacekv && !can_be_optimized()) || _impl_params->is_dynamic())
