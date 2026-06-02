@@ -73,6 +73,15 @@ std::vector<layout> crop_inst::calc_output_layouts(const crop_node& /*node*/, co
             cldnn::mem_lock<uint8_t, mem_lock_type::read> split_length_mem_lock(split_length_mem, impl_param.get_stream());
             const_data.emplace(2, make_tensor(split_length_mem->get_layout(), split_length_mem_lock.data()));
 
+            const auto len_vec = ov::get_tensor_data_as<int64_t>(const_data[2]);
+            std::string txt;
+            for (const auto& v : len_vec) {
+                if (!txt.empty())
+                    txt.append(", ");
+                txt.append(std::to_string(v));
+            }
+            GPU_DEBUG_TRACE_DETAIL << impl_param.desc->id << " : splits [" << txt << "]" << std::endl;
+
             ov::op::v1::VariadicSplit op;
             op.set_friendly_name(desc->id);
             output_shapes = shape_infer(&op, input_shapes, ov::make_tensor_accessor(const_data));

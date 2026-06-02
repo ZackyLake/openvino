@@ -50,6 +50,7 @@ scatter_update_inst::typed_primitive_inst(network& network, scatter_update_node 
 
 void scatter_update_inst::on_execute() {
     update_output_memory();
+    set_arguments();
     if (_outputs.size() > 0) {
         is_inplace = static_cast<bool>(_outputs[0]) && _network.get_engine().is_the_same_buffer(output_memory(), input_memory());
         GPU_DEBUG_TRACE_DETAIL << id() << " check inplace[" << is_inplace << "]: out[" << output_memory_ptr(0)->buffer_ptr() << "] in["

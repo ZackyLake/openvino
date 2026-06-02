@@ -181,7 +181,9 @@ KVCacheFusionMatcher::KVCacheFusionMatcher() {
                has_trim ? 'T' : 'N',
                has_update_kv ? (noupdkv ? 'O' : 'Y') : 'N');
         if (has_update_kv) {
-            printf("----here updatekv: [%s]\n", pattern_map.at(update_kv).get_node_shared_ptr()->get_friendly_name().c_str());
+            const auto slice_node = pattern_map.at(update_kv).get_node_shared_ptr();
+            printf("----here updatekv: [%s](%s)\n", slice_node->get_friendly_name().c_str(), 
+                pattern_map.at(past_seq_len).get_node_shared_ptr()->get_friendly_name().c_str());
         }
         
         const auto input0 = has_beam_idx ? pattern_map.at(gather_past).get_node_shared_ptr() : new_read_value_node;

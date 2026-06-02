@@ -455,16 +455,25 @@ void primitive_inst::update_shape() {
         if (!get_node().is_type<shape_of>() &&
         !(dep->get_node().get_selected_impl() ? dep->get_node().get_selected_impl()->is_cpu() : dep->get_node().get_preferred_impl_type() == impl_types::cpu)) {
             auto event = dep->get_impl_params()->out_event;
-            
-            if (event && event->is_set()) {
-                GPU_DEBUG_TRACE_DETAIL << id() << ": shape infer dependency " << i << " already set, skip\n";
-                continue;
-            }
 
             if (queue_type == QueueTypes::in_order) {
                 if (dep->get_flag(ExecutionFlags::ALREADY_WAITED)) {
                     GPU_DEBUG_TRACE_DETAIL << id() << ": shape infer dependency " << i << " already waited, skip\n";
                     continue;
+                } else {
+                    GPU_DEBUG_TRACE_DETAIL << id() << ": shape infer dependency " << i << " need flush to wait\n";
+
+                    static const auto skipwait = []() {
+                        const auto txt = std::getenv("skipwait");
+                        return txt && txt == std::string_view("true");
+                    }();
+                    if (skipwait) {
+                        if (event && event->is_set()) {
+                            //printf("[update_shape] (%s)'s dep %zu (%s) already set. skip\n", id().c_str(), i, dep->get_node().id().c_str());
+                            GPU_DEBUG_TRACE_DETAIL << id() << ": shape infer dependency " << i << " already set, skip\n ";
+                            continue;
+                        }
+                    }
                 }
             }
             
@@ -473,6 +482,11 @@ void primitive_inst::update_shape() {
 
             // Events may be not created for in-order queue, so take them for OOO queue only
             if (queue_type == QueueTypes::out_of_order && event) {
+                if (event->is_set()) {
+                    //printf("[update_shape] (%s)'s dep %zu (%s) already set. skip\n", id().c_str(), i, dep->get_node().id().c_str());
+                    GPU_DEBUG_TRACE_DETAIL << id() << ": shape infer dependency " << i << " already set, skip\n ";
+                    continue;
+                }
                 dependencies_events.push_back(event);
 
                 GPU_DEBUG_TRACE_DETAIL << id() << ": shape infer waits for " << i << " dependency\n";
@@ -1052,14 +1066,15 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
         if (actual_layouts[0] != _impl_params->get_input_layout(0)) {
             GPU_DEBUG_TRACE_DETAIL << id() << ": scatter_*_update has different layout so skip inplace" << std::endl;
         } else if (inplacekv) {
-            GPU_DEBUG_TRACE_DETAIL << id() << ": try make scatter_*_update inplace" << std::endl;
+            GPU_DEBUG_TRACE_DETAIL << id() << ": try make scatter_*_update inplace, output[" << (_outputs[0] ? _outputs[0]->buffer_ptr() : nullptr)
+                                   << "] allocated = " << mem_allocated() << std::endl;
             //getchar();
-            if (!_outputs[0]) {
+            if (!_outputs[0] || !mem_allocated()) {
                 GPU_DEBUG_TRACE_DETAIL << id() << ": make output[" << _impl_params->get_output_layout(0).to_short_string() << "] be input["
                                        << _impl_params->get_input_layout(0).to_short_string() << "]" << std::endl;
                 _outputs[0] = input_memory_ptr(0);
                 _max_output_layout_count[0] = _outputs[0]->count();
-
+                return;
             } else {
                 GPU_DEBUG_TRACE_DETAIL << id() << ": has output[" << _outputs[0]->buffer_ptr() << "] and input[" << input_memory_ptr(0)->buffer_ptr() << "]"
                                        << std::endl;

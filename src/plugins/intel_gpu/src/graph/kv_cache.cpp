@@ -51,9 +51,15 @@ int64_t kv_cache_inst::compute_trim_length(const kernel_impl_params& impl_param,
     OPENVINO_ASSERT(past_shape[sequence_axis_idx].is_static());
     GPU_DEBUG_TRACE_DETAIL << desc.id << " : compute_trim_length: past_shape " << past_shape << " at " << sequence_axis_idx << std::endl;
 
+    //printf("%s: kv=%zu, past_seq=%zu\n", desc.id.c_str(),
+    //    size_t(past_shape[sequence_axis_idx].get_length()), size_t(past_dim_updated[0]));
     const auto trim_length = past_shape[sequence_axis_idx].get_length() - past_dim_updated[0];
     GPU_DEBUG_TRACE_DETAIL << desc.id << " : compute_trim_length: trim_length = " << trim_length << std::endl;
-    OPENVINO_ASSERT(trim_length >= 0, "[GPU] past_seq_len shouldn't exceed stored sequence length");
+    OPENVINO_ASSERT(trim_length >= 0,
+                    "[GPU] past_seq_len shouldn't exceed stored sequence length: past=",
+                    past_shape[sequence_axis_idx].get_length(),
+                    " upd=",
+                    past_dim_updated[0]);
 
     return trim_length;
 }
