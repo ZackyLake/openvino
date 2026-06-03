@@ -506,13 +506,6 @@ void SyncInferRequest::wait() {
                     // Update the backing memory to match the block's current buffer and actual data size
                     impl->set_memory(block_mem, output_memory->count());
                     need_reallocate = false;
-                } else if (block_it != m_output_memory_blocks.end() && block_it->second->memory() && inplacekv) {
-                    auto block_mem = block_it->second->memory();
-                    auto* impl = usm_host_tensor->get_impl().get();
-                    // Update the backing memory to match the block's current buffer and actual data size
-                    impl->set_memory(block_mem, output_memory->count());
-                    need_reallocate = false;
-                    // printf("pick ext_block and skip here!\n");
                 } else if (usm_host_tensor && output_memory) {
                     need_reallocate = usm_host_tensor->get_impl()->get_original_memory()->size() < output_memory->size();
                 } else if (!is_remote_tensor_impl && output_memory) {
