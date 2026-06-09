@@ -470,14 +470,9 @@ void SyncInferRequest::wait() {
         }();
         bool zerocopy = false;
         if (inplacekv) {
-            if (internal_name.find("present") == 0) {
+            if (internal_name.find("present") != std::string::npos) {
                 zerocopy = true;
             }
-            auto block_it = m_output_memory_blocks.find(port_idx);
-            if (block_it != m_output_memory_blocks.end()) {
-                zerocopy = true;
-                //printf("pick ext_block and no update here!\n");
-            } 
         }
 
 

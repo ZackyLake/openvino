@@ -81,18 +81,20 @@ std::vector<layout> crop_inst::calc_output_layouts(const crop_node& /*node*/, co
                 txt.append(std::to_string(v));
             }
             GPU_DEBUG_TRACE_DETAIL << impl_param.desc->id << " : splits [" << txt << "]" << std::endl;
-
-            ov::op::v1::VariadicSplit op;
-            op.set_friendly_name(desc->id);
-            output_shapes = shape_infer(&op, input_shapes, ov::make_tensor_accessor(const_data));
-        } else {
-            auto input0_layout = impl_param.get_input_layout(0);
-            auto out_shape = input0_layout.get_partial_shape();
-            out_shape[axis] = ov::Dimension::dynamic();
-            GPU_DEBUG_TRACE_DETAIL << impl_param.desc->id << " : set dynamic at " << axis << "due to non-const splits" << std::endl;
-            // auto out_shape = ov::PartialShape::dynamic(input0_layout.get_partial_shape().size());
-            return { layout{out_shape, input0_layout.data_type, input0_layout.format } };
         }
+
+        ov::op::v1::VariadicSplit op;
+        op.set_friendly_name(desc->id);
+        output_shapes = shape_infer(&op, input_shapes, ov::make_tensor_accessor(const_data));
+
+        if (output_shapes.empty()) {
+            // Don't even know number of output, simply return dynamic as output shape
+            GPU_DEBUG_TRACE_DETAIL << impl_param.desc->id << " shape_infer return empty: splits [" << impl_param.get_input_layout(2) << "]" << std::endl;
+            auto input0_layout = impl_param.get_input_layout(0);
+            auto out_shape = ov::PartialShape::dynamic(input0_layout.get_partial_shape().size());
+            return {layout{out_shape, input0_layout.data_type, input0_layout.format}};
+        }
+        OPENVINO_ASSERT(desc->output_idx < output_shapes.size(), "[GPU] Shape_infer returns less ouput shape than request index");
     } else if (desc->op_mode == cldnn::crop_ngraph_op_mode::split) {
         std::unordered_map<size_t, ov::Tensor> const_data;
 
