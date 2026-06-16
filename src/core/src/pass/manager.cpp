@@ -38,6 +38,55 @@ PerfCounters& perf_counters() {
 
 #endif  // ENABLE_PROFILING_ITT_FULL
 
+#include <optional>
+
+struct MarkerRecords
+{
+    struct Marker
+    {
+        std::chrono::high_resolution_clock::time_point Time;
+        std::string Txt;
+        Marker(std::string&& txt) noexcept : Time(std::chrono::high_resolution_clock::now()), Txt(std::move(txt)) {}
+    };
+    std::deque<Marker> Markers;
+    std::atomic_flag Lock = ATOMIC_FLAG_INIT;
+    std::chrono::high_resolution_clock::time_point Begin = std::chrono::high_resolution_clock::now();
+    void PutMarker(std::string&& txt) noexcept
+    {
+        while (Lock.test_and_set());
+        Markers.emplace_back(std::move(txt));
+        Lock.clear();
+    }
+    ~MarkerRecords()
+    {
+        while (Lock.test_and_set());
+        if (!Markers.empty())
+        {
+            printf("@@##MarkerRecord: [%zu] marker\n", Markers.size());
+            const uint64_t tzero = Begin.time_since_epoch().count();
+            auto fpm = fopen(("memmarker" + std::to_string(tzero) + ".csv").c_str(), "w+");
+            fprintf(fpm, "id,time,txt\n");
+            uint32_t idx = 0;
+            for (const auto& marker : Markers)
+                fprintf(fpm, "%u,%zu,\"%s\"\n", idx++, std::chrono::duration_cast<std::chrono::microseconds>(marker.Time - Begin).count(), marker.Txt.c_str());
+            fclose(fpm);
+        }
+    }
+};
+
+__declspec(dllexport) void PutMarker(std::string&& txt) noexcept 
+{
+    static auto records = []() -> std::optional<MarkerRecords>
+    { 
+        const auto evar = std::getenv("marker");
+        if (evar && evar == std::string("true"))
+            return std::optional<MarkerRecords>(std::in_place);
+        return {};
+    }();
+    if (records)
+        records->PutMarker(std::move(txt));
+}
+
 namespace {
 
 /**
@@ -270,19 +319,24 @@ public:
     void serialize(const std::shared_ptr<ov::Model>& model, const std::string& pass_name) const {
         static size_t serialize_index = 0;
         if (m_serialize.is_enabled()) {
-            const auto& _serialize = [&]() {
+            const auto& _serialize = [&](bool dumpbin) {
                 auto file_name = gen_file_name(model->get_name(), pass_name, serialize_index++);
-                ov::pass::Serialize serialize(file_name.concat(".xml"), {});
+                std::filesystem::path bin_name;
+                if (dumpbin) {
+                    bin_name = file_name;
+                    bin_name.concat(".bin");
+                }
+                ov::pass::Serialize serialize(file_name.concat(".xml"), bin_name);
                 serialize.run_on_model(model);
             };
 
             if (m_serialize.is_bool()) {
-                _serialize();
+                _serialize(false);
             } else {
                 const auto& filter_tokens = ov::util::split_by_delimiter(m_serialize.get_str(), ',');
                 for (const auto& token : filter_tokens) {
                     if (pass_name.find(token) != std::string::npos) {
-                        _serialize();
+                        _serialize(true);
                         return;
                     }
                 }
@@ -298,9 +352,13 @@ private:
         std::string index_str = std::to_string(idx);
         const size_t num_digits_in_pass_index = index_str.length() > 2LU ? 0LU : (3LU - index_str.length());
         index_str = std::string(num_digits_in_pass_index, '0') + index_str;
+        std::string pass_name_;
+        pass_name_.reserve(pass_name.size());
+        for (const auto ch : pass_name)
+            pass_name_.push_back((std::isspace(ch) || ch == ':') ? '_' : ch);
 
         std::filesystem::path file_name{model_name};
-        file_name += "_" + index_str + "_" + pass_name;
+        file_name += "_" + index_str + "_" + pass_name_;
         return file_name;
     }
 
@@ -373,7 +431,9 @@ bool ov::pass::Manager::run_passes(const std::shared_ptr<ov::Model>& model) {
         needs_validation = (ov::as_type_ptr<ov::pass::Validate>(pass)) ? false : needs_validation || pass_changed_model;
 
         profiler.visualize(model, pass_name);
-        profiler.serialize(model, pass_name);
+        if (pass_changed_model) {
+            profiler.serialize(model, pass_name);
+        }
     }
     profiler.stop_timer(m_name, manager_changed_model);
 
