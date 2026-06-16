@@ -9,6 +9,7 @@
 #include <fstream>
 #include <unordered_map>
 #include <unordered_set>
+#include <variant>
 
 #include "openvino/cc/pass/itt.hpp"
 #include "openvino/core/coordinate_diff.hpp"
@@ -99,9 +100,9 @@ void serialize_func(std::ostream& xml_file,
 void handle_file_serialize_error(const std::filesystem::path& xml_path,
                                  const std::filesystem::path& bin_path,
                                  std::ofstream& xml,
-                                 std::ofstream& bin) {
+                                 std::ofstream* bin) {
     xml.close();
-    bin.close();
+    if (bin) bin->close();
     std::ignore = std::filesystem::remove(xml_path);
     std::ignore = std::filesystem::remove(bin_path);
 }
@@ -120,9 +121,20 @@ bool pass::Serialize::run_on_model(const std::shared_ptr<ov::Model>& model) {
     } else {
         ov::util::create_directory_recursive(m_xml_path.parent_path());
 
-        std::ofstream bin_file(m_bin_path, std::ios::binary);
-        OPENVINO_ASSERT(bin_file, "Can't open bin file: ", m_bin_path);
-        bin_file.exceptions(std::ofstream::failbit | std::ofstream::badbit);
+        std::variant<std::monostate, std::ofstream, std::ostringstream> bin;
+        std::ostream* bin_stream = nullptr;
+        if (m_bin_path.empty()) {
+            bin.emplace<2>();
+            bin_stream = &std::get<2>(bin);
+        } else {
+            bin.emplace<1>(m_bin_path, std::ios::binary);
+            bin_stream = &std::get<1>(bin);
+        }
+        auto bin_file = bin.index() == 1 ? &std::get<1>(bin) : nullptr;
+
+        //std::ofstream bin_file(m_bin_path, std::ios::binary);
+        //OPENVINO_ASSERT(bin_file, "Can't open bin file: ", m_bin_path);
+        //bin_file.exceptions(std::ofstream::failbit | std::ofstream::badbit);
 
         // create xml file
         std::ofstream xml_file(m_xml_path);
@@ -130,7 +142,7 @@ bool pass::Serialize::run_on_model(const std::shared_ptr<ov::Model>& model) {
         xml_file.exceptions(std::ofstream::failbit | std::ofstream::badbit);
 
         try {
-            serialize_func(xml_file, bin_file, model, m_version);
+            serialize_func(xml_file, *bin_stream, model, m_version);
         } catch (const ov::AssertFailure&) {
             // optimization decision was made to create .bin file upfront and
             // write to it directly instead of buffering its content in memory,
@@ -160,7 +172,7 @@ pass::Serialize::Serialize(const std::filesystem::path& xml_path,
     : m_xml_file{nullptr},
       m_bin_file{nullptr},
       m_xml_path{xml_path},
-      m_bin_path{bin_path.empty() ? provide_bin_path(xml_path) : bin_path},
+      m_bin_path{bin_path},
       m_version{version} {
     validate_xml_path(m_xml_path);
 }

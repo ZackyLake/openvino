@@ -361,7 +361,9 @@ void save_model(const std::shared_ptr<const ov::Model>& m,
 
     ov::pass::Manager manager("SaveModel");
     manager.register_pass<ov::pass::FusedNamesCleanup>();
-    manager.register_pass<ov::pass::Serialize>(output_model, "");
+    auto bin_path = output_model;
+    bin_path.replace_extension(".bin");
+    manager.register_pass<ov::pass::Serialize>(output_model, bin_path);
     manager.run_passes(std::move(cloned));
 }
 

@@ -184,8 +184,21 @@ KVCacheFusionMatcher::KVCacheFusionMatcher() {
             }
         }
 
-        const auto input0 = has_beam_idx ? pattern_map.at(gather_past).get_node_shared_ptr() : new_read_value_node;
+        static const auto env_updkv = std::getenv("updatekv");
+        static const auto noupdkv = env_updkv && std::string_view("false") == env_updkv;
+        printf("@@##kv fusion: [%s]: beam[%c] trim[%c] update[%c]\n",
+               past_node->get_variable_id().c_str(),
+               has_beam_idx ? 'Y' : 'N',
+               has_trim ? 'T' : 'N',
+               has_update_kv ? (noupdkv ? 'O' : 'Y') : 'N');
         if (has_update_kv) {
+            const auto slice_node = pattern_map.at(update_kv).get_node_shared_ptr();
+            printf("----here updatekv: [%s](%s)\n", slice_node->get_friendly_name().c_str(), 
+                pattern_map.at(past_seq_len).get_node_shared_ptr()->get_friendly_name().c_str());
+        }
+        
+        const auto input0 = has_beam_idx ? pattern_map.at(gather_past).get_node_shared_ptr() : new_read_value_node;
+        if (has_update_kv && !noupdkv) {
             OPENVINO_ASSERT(has_trim);
             kv_cache_node = std::make_shared<op::KVCache>(input0,
                                                           concat_node->input(1).get_source_output(),
@@ -213,9 +226,7 @@ KVCacheFusionMatcher::KVCacheFusionMatcher() {
         ov::copy_runtime_info(m.get_matched_nodes(), kv_cache_node);
         ov::replace_node(concat_node, kv_cache_node);
 
-        if (pattern_map.count(convert_present) > 0) {
-            present_node->set_argument(0, kv_cache_node->output(0));
-        }
+        present_node->set_argument(0, kv_cache_node->output(0));
 
         return true;
     };
