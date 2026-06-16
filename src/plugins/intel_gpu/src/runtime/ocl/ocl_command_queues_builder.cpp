@@ -20,7 +20,9 @@ command_queues_builder::command_queues_builder()
 std::vector<cl_queue_properties> command_queues_builder::get_properties(const cl::Device& device, uint16_t stream_id) {
     std::vector<cl_queue_properties> properties;
 
+    std::stringstream infostream;
     if (_priority_mode.has_value()) {
+        infostream << " priority[" << _priority_mode.value() << "]";
         unsigned cl_queue_priority_value = CL_QUEUE_PRIORITY_MED_KHR;
         switch (_priority_mode.value()) {
             case ov::hint::Priority::HIGH:
@@ -37,6 +39,7 @@ std::vector<cl_queue_properties> command_queues_builder::get_properties(const cl
     }
 
     if (_throttle_mode.has_value()) {
+        infostream << " throttle[" << _throttle_mode.value() << "]";
         unsigned cl_queue_throttle_value = CL_QUEUE_THROTTLE_MED_KHR;
         switch (_throttle_mode.value()) {
             case ov::intel_gpu::hint::ThrottleLevel::HIGH:
@@ -78,6 +81,9 @@ std::vector<cl_queue_properties> command_queues_builder::get_properties(const cl
             GPU_DEBUG_INFO << "Requested out-of-order queue is not supported by current device. Use in-order instead\n";
         }
     }
+
+    infostream << " OoO[" << out_of_order << "]";
+    GPU_DEBUG_INFO << "CL_QUEUE:" << infostream.str() << std::endl;
 
     cl_command_queue_properties cl_queue_properties =
         ((_profiling ? CL_QUEUE_PROFILING_ENABLE : 0) | (out_of_order ? CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE : 0));
