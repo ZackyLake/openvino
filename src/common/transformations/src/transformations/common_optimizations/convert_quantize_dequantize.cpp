@@ -204,29 +204,6 @@ ConvertQuantizeDequantize::ConvertQuantizeDequantize(const ov::element::TypeVect
         if (const_out_high)
             new_out_high = const_out_high;
 
-        if (const_out_low && const_out_high) {
-            const auto new_out_low_val = const_out_low->cast_vector<float>()[0];
-            const auto new_out_high_val = const_out_high->cast_vector<float>()[0];
-            float in_low_val = 0;
-            op_util::get_single_value(ov::as_type_ptr<v0::Constant>(input_low.get_node_shared_ptr()), in_low_val);
-            float in_high_val = 0;
-            op_util::get_single_value(ov::as_type_ptr<v0::Constant>(input_high.get_node_shared_ptr()), in_high_val);
-            const auto diff =
-                std::max(std::abs(new_out_low_val - in_low_val), std::abs(new_out_high_val - in_high_val));
-            if (dq_type != ov::element::f32 || fq_type != ov::element::f32) {
-                printf("[%s]: dq[%s] fq[%s] -> [%s], new out[%f ~ %f], in[%f ~ %f], eps[%e]\n",
-                       fq->get_friendly_name().c_str(),
-                       dq_type.c_type_string().c_str(),
-                       fq_type.c_type_string().c_str(),
-                       mid_type.c_type_string().c_str(),
-                       const_out_low->cast_vector<float>()[0],
-                       const_out_high->cast_vector<float>()[0],
-                       in_low_val,
-                       in_high_val,
-                       diff);
-            }
-        }
-
         auto new_fq =
             std::make_shared<v0::FakeQuantize>(data, input_low, input_high, new_out_low, new_out_high, levels);
         

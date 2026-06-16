@@ -402,7 +402,7 @@ std::shared_ptr<ov::ICompiledModel> Plugin::import_model(std::istream& model,
         ~Exiter()  
         {
             const auto tend = std::chrono::high_resolution_clock::now();
-            printf("@@##Finish [import_model] in [%zu]ms\n", std::chrono::duration_cast<std::chrono::milliseconds>(tend - Tbegin).count());
+            //printf("@@##Finish [import_model] in [%zu]ms\n", std::chrono::duration_cast<std::chrono::milliseconds>(tend - Tbegin).count());
             PutMarker("~import_model");
         }
     };

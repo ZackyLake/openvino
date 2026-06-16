@@ -96,12 +96,12 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
         return output.get_node_shared_ptr()->description() == "NullNode";
     };
 
-    if (inplacekv) {
-        printf("InplaceKV on [%s] -> K[%s] V[%s]\n",
-               node->get_friendly_name().c_str(),
-               past_key.get_node()->get_friendly_name().c_str(),
-               past_value.get_node()->get_friendly_name().c_str());
-    }
+    // if (inplacekv) {
+    //     printf("InplaceKV on [%s] -> K[%s] V[%s]\n",
+    //            node->get_friendly_name().c_str(),
+    //            past_key.get_node()->get_friendly_name().c_str(),
+    //            past_value.get_node()->get_friendly_name().c_str());
+    // }
 
     // The length of all tokens (past + current) is `seqlens_k` + 1.
     // current = Q.shape[2], past = `seqlens_k` + 1 - current
@@ -146,10 +146,10 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
     }();
     CachedNodes* cache = nullptr;
     if (const auto it = m_seqk_cache.find(seqlens_k); gqareuse && it != m_seqk_cache.end()) {
-        printf("Reuse GQA-slice[%s]![%s] reuses seq[%s]\n",
-               rangeids ? "range" : "cumsum",
-               node->get_friendly_name().c_str(),
-               seqlens_k.get_node()->get_friendly_name().c_str());
+        // printf("Reuse GQA-slice[%s]![%s] reuses seq[%s]\n",
+        //        rangeids ? "range" : "cumsum",
+        //        node->get_friendly_name().c_str(),
+        //        seqlens_k.get_node()->get_friendly_name().c_str());
         q_pos_ids = it->second.pos_ids;
         kv_slices = it->second.kv_slices;
         concat_kv_len = it->second.concat_kv_len;
@@ -357,10 +357,10 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
     const size_t kv_num_heads_factor = num_heads / kv_num_heads;
     if (kv_num_heads_factor > 1) {
         if (qknobcast) {
-            printf("skip QK broadcast![%s] with [%zu]/[%zu]\n",
-                   node->get_friendly_name().c_str(),
-                   size_t(num_heads),
-                   size_t(kv_num_heads));
+            // printf("skip QK broadcast![%s] with [%zu]/[%zu]\n",
+            //        node->get_friendly_name().c_str(),
+            //        size_t(num_heads),
+            //        size_t(kv_num_heads));
         } else {
             const auto kv_shape = register_new_node<v3::ShapeOf>(K);
             const auto kv_shape_prev_2 = get_dimensions(kv_shape, {0, 1});
@@ -425,7 +425,7 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
 
     std::shared_ptr<ov::Node> qga_output;
     if (!mask) {
-        printf("casual without mask for [%s]!\n", node->get_friendly_name().c_str());
+        //printf("casual without mask for [%s]!\n", node->get_friendly_name().c_str());
         qga_output = register_new_node<v13::ScaledDotProductAttention>(Q, K, V, true);
     } else if (scale != 0.0f) {
         auto scale_node = register_new_node(v0::Constant::create(T, Shape{}, {scale}));

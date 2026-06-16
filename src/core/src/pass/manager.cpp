@@ -60,7 +60,7 @@ struct MarkerRecords
     ~MarkerRecords()
     {
         while (Lock.test_and_set());
-        printf("@@##MarkerRecord: [%zu] marker\n", Markers.size());
+        //printf("@@##MarkerRecord: [%zu] marker\n", Markers.size());
         if (!Markers.empty())
         {
             const uint64_t tzero = Begin.time_since_epoch().count();

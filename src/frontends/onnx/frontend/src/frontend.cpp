@@ -293,7 +293,7 @@ void FrontEnd::normalize(const std::shared_ptr<ov::Model>& model) const {
         }
             
         for (const auto& out : removes) {
-            printf("InplaceKV remove output [%s]\n", out->get_friendly_name().c_str());
+            OPENVINO_DEBUG("InplaceKV remove output [", out->get_friendly_name(), "]\n");
             model->remove_result(out);
         }
         

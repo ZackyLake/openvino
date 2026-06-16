@@ -376,9 +376,6 @@ ov::pass::ConvertWeightCompressedConv1x1ToMatmul::ConvertWeightCompressedConv1x1
             unsqueeze->set_friendly_name(matmul_out->get_friendly_name() + "_unsqueeze");
             matmul_out = unsqueeze;
         }
-        printf("conv1x1->matmul here [%s]. squeeze[%c]\n",
-               conv1x1->get_friendly_name().c_str(),
-               squeeze_activation ? 'Y' : 'N');
 
         // Build final output, optionally wrapping in Convert
         std::shared_ptr<Node> final_out = matmul_out;
@@ -450,15 +447,6 @@ ov::pass::RewireMatMulDim3::RewireMatMulDim3() {
         else
             pass = false;
 
-        printf("RewireMatMulDim3 [%c] on [%s](%s) with [%s](%s) & [%s](%s)\n",
-               pass ? 'Y' : 'N',
-               orig_add->get_friendly_name().c_str(),
-               orig_add->get_output_partial_shape(0).to_string().c_str(),
-               orig_prev->get_friendly_name().c_str(),
-               orig_prev->get_output_partial_shape(0).to_string().c_str(),
-               orig_mm->get_friendly_name().c_str(),
-               orig_mmcvt->get_output_partial_shape(0).to_string().c_str()
-        );
         if (!pass)
             return false;
 

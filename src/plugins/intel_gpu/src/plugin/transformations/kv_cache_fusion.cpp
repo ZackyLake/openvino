@@ -175,7 +175,7 @@ KVCacheFusionMatcher::KVCacheFusionMatcher() {
 
         static const auto env_updkv = std::getenv("updatekv");
         static const auto noupdkv = env_updkv && std::string_view("false") == env_updkv;
-        printf("@@##kv fusion: [%s]: beam[%c] trim[%c] update[%c]\n",
+        /*printf("@@##kv fusion: [%s]: beam[%c] trim[%c] update[%c]\n",
                past_node->get_variable_id().c_str(),
                has_beam_idx ? 'Y' : 'N',
                has_trim ? 'T' : 'N',
@@ -185,6 +185,7 @@ KVCacheFusionMatcher::KVCacheFusionMatcher() {
             printf("----here updatekv: [%s](%s)\n", slice_node->get_friendly_name().c_str(), 
                 pattern_map.at(past_seq_len).get_node_shared_ptr()->get_friendly_name().c_str());
         }
+        */
         
         const auto input0 = has_beam_idx ? pattern_map.at(gather_past).get_node_shared_ptr() : new_read_value_node;
         if (has_update_kv && !noupdkv) {
@@ -225,11 +226,6 @@ KVCacheFusionMatcher::KVCacheFusionMatcher() {
 }
 
 bool KVCacheFusion::run_on_model(const std::shared_ptr<ov::Model>& m) {
-    static const auto pausevar = std::getenv("cpstop");
-    if (pausevar && pausevar == std::string_view("true")) {
-        printf("pause at kvfusion\n");
-        getchar();
-    } 
     bool res = pass::GraphRewrite::run_on_model(m);
     if (res) {
         ov::SinkVector sinks = m->get_sinks();

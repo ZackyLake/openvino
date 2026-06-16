@@ -92,7 +92,7 @@ std::vector<layout> crop_inst::calc_output_layouts(const crop_node& /*node*/, co
             GPU_DEBUG_TRACE_DETAIL << impl_param.desc->id << " shape_infer return empty: splits [" << impl_param.get_input_layout(2) << "]" << std::endl;
             auto input0_layout = impl_param.get_input_layout(0);
             auto out_shape = ov::PartialShape::dynamic(input0_layout.get_partial_shape().size());
-            return {layout{out_shape, input0_layout.data_type, input0_layout.format}};
+            return { layout{out_shape, input0_layout.data_type, input0_layout.format } };
         }
         OPENVINO_ASSERT(desc->output_idx < output_shapes.size(), "[GPU] Shape_infer returns less ouput shape than request index");
     } else if (desc->op_mode == cldnn::crop_ngraph_op_mode::split) {
@@ -138,6 +138,7 @@ std::vector<layout> crop_inst::calc_output_layouts(const crop_node& /*node*/, co
         return {layout{ref_in_sizes.get_partial_shape(in_layout.get_partial_shape().size(), in_layout.get_rank()), in_layout.data_type, in_layout.format}};
     }
 
+    // ensure all output is static
     bool is_output_static = input_shapes[0].is_static();
     std::vector<layout> output_layouts;
     for (size_t i = 0; i < output_shapes.size(); ++i) {
@@ -145,7 +146,6 @@ std::vector<layout> crop_inst::calc_output_layouts(const crop_node& /*node*/, co
         if (i < desc->output_idx) {
             is_output_static = is_output_static && output_shapes[i].is_static();
         }
-        //is_output_static = (output_shapes[i].is_static()) ? true : is_output_static;
     }
 
     // update split offsets

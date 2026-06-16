@@ -83,7 +83,7 @@ std::vector<cl_queue_properties> command_queues_builder::get_properties(const cl
     }
 
     infostream << " OoO[" << out_of_order << "]";
-    printf("CL_QUEUE:%s\n", infostream.str().c_str());
+    GPU_DEBUG_INFO << "CL_QUEUE:" << infostream.str() << std::endl;
 
     cl_command_queue_properties cl_queue_properties =
         ((_profiling ? CL_QUEUE_PROFILING_ENABLE : 0) | (out_of_order ? CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE : 0));

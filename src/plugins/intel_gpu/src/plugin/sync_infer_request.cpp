@@ -1149,7 +1149,6 @@ void SyncInferRequest::init_mappings() {
         m_output_ports_map[output_idx] = outputs[output_idx];
         m_output_names_map[output_idx] = m_graph->out_port_index_to_internal(output_idx);
     }
-    printf("##@@inferreq: inputs[%zu] outputs[%zu]\n", inputs.size(), outputs.size());
 }
 
 bool SyncInferRequest::is_batched_input(const ov::Output<const ov::Node>& port) const {
