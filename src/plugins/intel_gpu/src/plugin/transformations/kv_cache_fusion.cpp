@@ -17,10 +17,14 @@
 #include "openvino/op/gather.hpp"
 #include "openvino/op/parameter.hpp"
 #include "openvino/op/read_value.hpp"
+#include "openvino/op/result.hpp"
+#include "openvino/op/scaled_dot_product_attention.hpp"
 #include "openvino/op/scatter_elements_update.hpp"
+#include "openvino/op/scatter_update.hpp"
 #include "openvino/op/sink.hpp"
 #include "openvino/op/slice.hpp"
 #include "openvino/op/strided_slice.hpp"
+#include "openvino/op/variadic_split.hpp"
 #include "openvino/pass/graph_rewrite.hpp"
 #include "openvino/pass/pattern/op/label.hpp"
 #include "openvino/pass/pattern/op/wrap_type.hpp"
@@ -240,6 +244,119 @@ bool KVCacheFusion::run_on_model(const std::shared_ptr<ov::Model>& m) {
 
 KVCacheFusion::KVCacheFusion() {
     add_matcher<ov::intel_gpu::KVCacheFusionMatcher>();
+}
+
+StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
+    using namespace ov::pass::pattern;
+
+    auto past = wrap_type<ov::op::v0::Parameter>();
+    auto pos_idx = any_input();
+    auto new_token_data = any_input();
+    auto scatter_axis = wrap_type<ov::op::v0::Constant>();
+    auto scatter_update = wrap_type<ov::op::v3::ScatterUpdate>({past, pos_idx, new_token_data, scatter_axis});
+
+    auto split_axis = wrap_type<ov::op::v0::Constant>();
+    auto split_begin = wrap_type<ov::op::v0::Constant>();
+    auto split_present = any_input();
+    auto split_tail = wrap_type<ov::op::v0::Constant>();
+    auto split_lengths = wrap_type<ov::op::v0::Concat>({split_begin, split_present, split_tail});
+    auto split = wrap_type<ov::op::v1::VariadicSplit>({scatter_update, split_axis, split_lengths});
+    auto result = wrap_type<ov::op::v0::Result>({split});
+
+    ov::matcher_pass_callback callback = [OV_CAPTURE_CPY_AND_THIS](ov::pass::pattern::Matcher& m) {
+        if (transformation_callback(m.get_match_root())) {
+            return false;
+        }
+
+        static const auto env_slkv = std::getenv("statelesskv");
+        static const auto noslkv = env_slkv && std::string_view("false") == env_slkv;
+        if (noslkv) {
+            return false;
+        }
+
+        const auto& pattern_map = m.get_pattern_value_map();
+        auto split_node = ov::as_type_ptr<ov::op::v1::VariadicSplit>(pattern_map.at(split).get_node_shared_ptr());
+        auto scatter_axis_node = ov::as_type_ptr<ov::op::v0::Constant>(pattern_map.at(scatter_axis).get_node_shared_ptr());
+        auto split_axis_node = ov::as_type_ptr<ov::op::v0::Constant>(pattern_map.at(split_axis).get_node_shared_ptr());
+        auto split_begin_node = ov::as_type_ptr<ov::op::v0::Constant>(pattern_map.at(split_begin).get_node_shared_ptr());
+        auto split_tail_node = ov::as_type_ptr<ov::op::v0::Constant>(pattern_map.at(split_tail).get_node_shared_ptr());
+        auto result_node = ov::as_type_ptr<ov::op::v0::Result>(pattern_map.at(result).get_node_shared_ptr());
+
+        const auto scatter_axis_values = scatter_axis_node->cast_vector<int64_t>();
+        const auto split_axis_values = split_axis_node->cast_vector<int64_t>();
+        if (scatter_axis_values.size() != 1 || split_axis_values.size() != 1 || scatter_axis_values[0] != split_axis_values[0]) {
+            return false;
+        }
+
+        const auto split_begin_values = split_begin_node->cast_vector<int64_t>();
+        const auto split_tail_values = split_tail_node->cast_vector<int64_t>();
+        if (split_begin_values.size() != 1 || split_begin_values[0] != 0 || split_tail_values.size() != 1 || split_tail_values[0] != -1) {
+            return false;
+        }
+
+        if (split_node->get_output_size() != 3) {
+            return false;
+        }
+        if (!split_node->output(0).get_target_inputs().empty() || !split_node->output(2).get_target_inputs().empty()) {
+            return false;
+        }
+        const auto present_kv = split_node->output(1).get_target_inputs();
+        if (present_kv.size() != 2) {
+            return false;
+        }
+        const ov::Input<ov::Node>* sdpa_input = nullptr;
+        std::shared_ptr<ov::op::v13::ScaledDotProductAttention> sdpa_node;
+        for (auto& target_input : present_kv) {
+            if (target_input.get_node() == result_node.get()) {
+                continue;
+            }
+            if (sdpa_input) {
+                return false;
+            }
+            sdpa_node = ov::as_type_ptr<ov::op::v13::ScaledDotProductAttention>(target_input.get_node()->shared_from_this());
+            if (!sdpa_node) {
+                return false;
+            }
+            if (target_input.get_index() != 1 && target_input.get_index() != 2) {
+                return false;
+            }
+            sdpa_input = &target_input;
+        }
+        if (!sdpa_node || transformation_callback(sdpa_node)) {
+            return false;
+        }
+        const auto past_ = pattern_map.at(past);
+        printf("@@##statelesskv: [%s][%s](%zu) sdpa[%s]\n",
+               past_.get_any_name().c_str(),
+               result_node->get_friendly_name().c_str(),
+               result_node->get_instance_id(),
+               sdpa_node->get_friendly_name().c_str());
+        auto stateless_kv = std::make_shared<op::StatelessKV>(pattern_map.at(past),
+                                                              pattern_map.at(new_token_data),
+                                                              pattern_map.at(split_present),
+                                                              pattern_map.at(pos_idx),
+                                                              scatter_axis_values[0]);
+        stateless_kv->set_friendly_name(past_.get_any_name() + "_stateless");
+        ov::copy_runtime_info(ov::NodeVector{pattern_map.at(scatter_update).get_node_shared_ptr(), split_node},
+                              stateless_kv);
+        stateless_kv->output(0).set_names(result_node->output(0).get_names());
+
+        sdpa_input->replace_source_output(stateless_kv->output(1));
+        result_node->input(0).replace_source_output(stateless_kv->output(0));
+
+        return true;
+    };
+
+    auto m = std::make_shared<ov::pass::pattern::Matcher>(result, "StatelessKVFusionMatcher");
+    this->register_matcher(m, callback);
+}
+
+bool StatelessKVFusion::run_on_model(const std::shared_ptr<ov::Model>& m) {
+    return pass::GraphRewrite::run_on_model(m);
+}
+
+StatelessKVFusion::StatelessKVFusion() {
+    add_matcher<ov::intel_gpu::StatelessKVFusionMatcher>();
 }
 
 }  // namespace ov::intel_gpu

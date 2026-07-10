@@ -511,7 +511,8 @@ void primitive_inst::update_shape() {
         auto& new_layout = new_layouts[idx];
         auto new_pshape = new_layout.get_partial_shape();
         auto& impl_layout = _impl_params->get_output_layout(idx);
-        if (!get_node().is_type<reshape>() || (!get_node().get_input_layout(0).data_padding.is_dynamic() && !get_node().can_be_optimized())) {
+        if (get_node().is_type<stateless_kv>() && idx == 1) {
+        } else if (!get_node().is_type<reshape>() || (!get_node().get_input_layout(0).data_padding.is_dynamic() && !get_node().can_be_optimized())) {
             auto data_padding = padding::max(impl_layout.data_padding, new_layout.data_padding);
             new_layout.data_padding = padding::max(get_node().get_primitive()->get_output_padding(idx), data_padding);
         }
@@ -1085,6 +1086,32 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
                 GPU_DEBUG_TRACE_DETAIL << id() << ": inplace reinterpret output into [" << _outputs[0]->get_layout() << "]" << std::endl;
                 set_flag(ExecutionFlags::SKIP);
                 return;
+            }
+        }
+    }
+    if (get_node().is_type<stateless_kv>()) {
+        if (inplacekv) {
+            const auto users = get_user_insts();
+            const auto output_it = std::find_if(users.begin(), users.end(), [](primitive_inst* user) {
+                return user->is_output();
+            });
+            OPENVINO_ASSERT(output_it != users.end(), "[GPU] stateless_kv should directly connects to an output.");
+            auto& result = **output_it;
+            const auto past_tensor = input_memory_ptr(0);
+            const auto present_tensor = result._outputs[0];
+            if (present_tensor) {
+                const auto is_same = (past_tensor && present_tensor) ? _network.get_engine().is_the_same_buffer(*present_tensor, *past_tensor) : false;
+                GPU_DEBUG_TRACE_DETAIL << id() << ": input[" << past_tensor->buffer_ptr() << "] and output[" << present_tensor->buffer_ptr() << "]("
+                                       << result.id() << ") same:" << is_same << std::endl;
+                GPU_DEBUG_TRACE_DETAIL << id() << ": input layout[" << past_tensor->get_layout().to_short_string() << "] and output layout["
+                                       << present_tensor->get_layout().to_short_string() << "](" << result.id() << ") [" << actual_layouts[1].to_short_string()
+                                       << "]" << std::endl;
+                _outputs[0] = present_tensor;
+                _outputs[1] = get_network().get_engine().reinterpret_buffer(*present_tensor, actual_layouts[1]);
+                result.set_flag(ExecutionFlags::SKIP);
+                return;
+            } else {
+                GPU_DEBUG_TRACE_DETAIL << id() << ": does not find set tensor on connected output node: " << result.id() << std::endl;
             }
         }
     }

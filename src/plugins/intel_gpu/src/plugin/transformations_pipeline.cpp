@@ -1575,6 +1575,7 @@ void TransformationsPipeline::apply(std::shared_ptr<ov::Model> func) {
             return rank != 4;
         });
         manager.register_pass<ov::intel_gpu::KVCacheFusion>();
+        manager.register_pass<ov::intel_gpu::StatelessKVFusion>();
         manager.register_pass<ov::intel_gpu::FullyConnectedConvertFusion>();
         manager.register_pass<ov::intel_gpu::TransposeFusion>(device_info.supports_immad);
 

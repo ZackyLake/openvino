@@ -107,6 +107,42 @@ protected:
     ov::element::Type m_output_type;
 };
 
+
+/// \brief Operator that implements Key-Values cache subgraph for large language models.
+class StatelessKV : public ov::op::Op {
+public:
+    OPENVINO_OP("StatelessKV", "gpu_opset");
+
+    StatelessKV() = default;
+
+    StatelessKV(const Output<Node>& past,
+                const Output<Node>& new_token_data,
+                const Output<Node>& present_seq_len,
+                const Output<Node>& pos_idx,
+                int64_t concat_axis);
+    bool visit_attributes(ov::AttributeVisitor& visitor) override;
+
+    void validate_and_infer_types() override;
+
+    std::shared_ptr<Node> clone_with_new_inputs(const ov::OutputVector& new_args) const override;
+
+    int64_t get_concat_axis() const { return m_concat_axis; }
+
+    void set_concat_axis(int64_t axis) { m_concat_axis = axis; }
+
+    int64_t get_update_offset() const { return m_update_offset; }
+    void set_update_offset(int64_t update_offset) { m_update_offset = update_offset; }
+
+protected:
+    StatelessKV(const OutputVector& inputs,
+            int64_t concat_axis);
+
+    int64_t m_concat_axis = 0;
+    int64_t m_update_offset = 0;
+};
+
+
 std::vector<ov::PartialShape> shape_infer(const KVCache* op, const std::vector<ov::PartialShape>& input_shapes);
+std::vector<ov::PartialShape> shape_infer(const StatelessKV* op, const std::vector<ov::PartialShape>& input_shapes);
 
 }   // namespace ov::intel_gpu::op

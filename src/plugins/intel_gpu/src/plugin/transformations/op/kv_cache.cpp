@@ -287,4 +287,58 @@ std::vector<ov::PartialShape> shape_infer(const KVCacheCompressed* op,
     return out_shapes;
 }
 
+
+
+StatelessKV::StatelessKV(const OutputVector& inputs, int64_t concat_axis) : Op(inputs), m_concat_axis(concat_axis) {}
+
+StatelessKV::StatelessKV(const Output<Node>& past,
+                         const Output<Node>& new_token_data,
+                         const Output<Node>& present_seq_len,
+                         const Output<Node>& pos_idx,
+                         int64_t concat_axis)
+    : StatelessKV({past, new_token_data, present_seq_len, pos_idx}, concat_axis) {
+    validate_and_infer_types();
+}
+
+
+bool StatelessKV::visit_attributes(ov::AttributeVisitor& visitor) {
+    visitor.on_attribute("concat_axis", m_concat_axis);
+    return true;
+}
+
+void StatelessKV::validate_and_infer_types() {
+    const auto input_type = get_input_element_type(0);
+    const auto& input_shape = get_input_partial_shape(0);
+    const auto& append_shape = get_input_partial_shape(1);
+
+    std::vector<ov::PartialShape> input_shapes = {input_shape, append_shape};
+
+    auto shapes = shape_infer(this, input_shapes);
+
+    set_output_type(0, input_type, shapes[0]);
+    set_output_type(1, input_type, shapes[1]);
+}
+
+std::shared_ptr<Node> StatelessKV::clone_with_new_inputs(const ov::OutputVector& new_args) const {
+    check_new_args_count(this, new_args);
+    return std::make_shared<StatelessKV>(new_args.at(0), new_args.at(1), new_args.at(2), new_args.at(3), m_concat_axis);
+}
+
+std::vector<ov::PartialShape> shape_infer(const StatelessKV* op, const std::vector<ov::PartialShape>& input_shapes) {
+    auto output_shape = input_shapes[0];
+
+    const auto concat_axis = ov::util::normalize(op->get_concat_axis(), input_shapes[0].size());
+    if (input_shapes[0][concat_axis].is_static() && input_shapes[1][concat_axis].is_static()) {
+        const auto update_offset = op->get_update_offset();
+        const auto updated_dim = input_shapes[1][concat_axis] + update_offset;
+        OPENVINO_ASSERT(updated_dim.get_length() <= input_shapes[0][concat_axis].get_length());
+        output_shape[concat_axis] = updated_dim;
+    }
+    std::vector<ov::PartialShape> out_shapes{input_shapes[0], output_shape};
+
+    return out_shapes;
+}
+
+
+
 }  // namespace ov::intel_gpu::op

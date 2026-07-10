@@ -50,6 +50,23 @@ public:
 
 using kv_cache_node = typed_program_node<kv_cache>;
 
+template <>
+struct typed_program_node<stateless_kv> : public typed_program_node_base<stateless_kv> {
+private:
+    using parent = typed_program_node_base<stateless_kv>;
+
+public:
+    using parent::parent;
+
+    program_node& input() const { return get_dependency(0); }
+
+    std::vector<size_t> get_shape_infer_dependencies() const override {
+        return {2};
+    }
+};
+
+using stateless_kv_node = typed_program_node<stateless_kv>;
+
 template<>
 class typed_primitive_inst<kv_cache> : public typed_primitive_inst_base<kv_cache>, public memory_state::releasable_variable {
     using parent = typed_primitive_inst_base<kv_cache>;
@@ -112,5 +129,32 @@ private:
 };
 
 using kv_cache_inst = typed_primitive_inst<kv_cache>;
+
+template<>
+class typed_primitive_inst<stateless_kv> : public typed_primitive_inst_base<stateless_kv> {
+    using parent = typed_primitive_inst_base<stateless_kv>;
+
+public:
+    template<typename ShapeType>
+    static std::vector<layout> calc_output_layouts(stateless_kv_node const& /*node*/, const kernel_impl_params& impl_param);
+    static layout calc_output_layout(const stateless_kv_node& node, kernel_impl_params const& impl_param);
+
+    static std::string to_string(const stateless_kv_node& node);
+
+    void update_output_memory() override;
+
+    bool get_is_inplace() const { return m_is_inplace; }
+
+    static int64_t compute_update_offset(const kernel_impl_params& impl_param, const stateless_kv& desc);
+
+    typed_primitive_inst(network& network, const stateless_kv_node& desc);
+    typed_primitive_inst(network& network) : parent(network) {}
+
+private:
+    void on_execute() override;
+    bool m_is_inplace = false;
+};
+
+using stateless_kv_inst = typed_primitive_inst<stateless_kv>;
 
 } // namespace cldnn
