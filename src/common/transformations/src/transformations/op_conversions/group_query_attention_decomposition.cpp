@@ -122,9 +122,14 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
 
     ov::Output<ov::Node> q_pos_ids;
     ov::Output<ov::Node> kv_slices;
+    std::shared_ptr<ov::Node> past_kv_len;
     std::shared_ptr<ov::Node> concat_kv_len;
     static const auto gqareuse = []() {
         const auto txt = std::getenv("gqareuse");
+        return !(txt && txt == std::string_view("false"));
+    }();
+    static const auto origingqa = []() {
+        const auto txt = std::getenv("origingqa");
         return !(txt && txt == std::string_view("false"));
     }();
     static const auto rangeids = []() {
@@ -139,6 +144,7 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
         //        seqlens_k.get_node()->get_friendly_name().c_str());
         q_pos_ids = it->second.pos_ids;
         kv_slices = it->second.kv_slices;
+        past_kv_len = it->second.past_kv_len;
         concat_kv_len = it->second.concat_kv_len;
         cache = &it->second;
     } else {
@@ -157,12 +163,16 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
             auto ones_y = register_new_node<v1::Add>(zeros_y, one_without_shape);
             q_len_idx = register_new_node<v0::CumSum>(ones_y, zero_without_shape, true, false);
         }
+        concat_kv_len = register_new_node<v0::Convert>(total_sequence_length, ov::element::i64);
+        past_kv_len = register_new_node<v1::Subtract>(concat_kv_len, current_seqlen);
+        // past_kv_len = past_seqlen;
+        // concat_kv_len = seqlens_1d;
         q_pos_ids = register_new_node<v1::Add>(q_len_idx, past_seqlen);
 
         kv_slices = std::make_shared<ov::op::v0::Concat>(ov::NodeVector{zero, seqlens_1d, negone}, 0);
-        concat_kv_len = seqlens_1d;
 
-        cache = &m_seqk_cache.insert_or_assign(seqlens_k, CachedNodes{q_pos_ids, kv_slices, concat_kv_len}).first->second;
+        cache = &m_seqk_cache.insert_or_assign(seqlens_k, CachedNodes{q_pos_ids, kv_slices, past_kv_len, concat_kv_len})
+                     .first->second;
     }
     OPENVINO_ASSERT(cache);
 
@@ -222,7 +232,7 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
         const auto scatter_axis = register_new_node(v0::Constant::create(ov::element::i64, ov::Shape{1}, {2}));
         K = register_new_node<v3::ScatterUpdate>(past_key, scatter_idx, K, scatter_axis);
         V = register_new_node<v3::ScatterUpdate>(past_value, scatter_idx, V, scatter_axis);
-    } else if (inplacekv) {
+    } else if (inplacekv && !origingqa) {
 
         auto updateK = register_new_node<v3::ScatterUpdate>(past_key, q_pos_ids, K, two);
         auto updateV = register_new_node<v3::ScatterUpdate>(past_value, q_pos_ids, V, two);
@@ -233,8 +243,8 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
         auto construct_kv_cache = [&](const ov::Output<ov::Node>& past, const ov::Output<ov::Node>& current) {
             return register_new_node<v0::Concat>(ov::OutputVector{past, current}, 2);
         };
-        past_key = register_new_node<v8::Slice>(past_key, zero, past_seqlen, one, two);
-        past_value = register_new_node<v8::Slice>(past_value, zero, past_seqlen, one, two);
+        past_key = register_new_node<v8::Slice>(past_key, zero, past_kv_len, one, two);
+        past_value = register_new_node<v8::Slice>(past_value, zero, past_kv_len, one, two);
         K = construct_kv_cache(past_key, K);
         V = construct_kv_cache(past_value, V);
     }

@@ -91,6 +91,13 @@ class StatelessKVFusionMatcher : public ov::pass::MatcherPass {
 public:
     OPENVINO_MATCHER_PASS_RTTI("StatelessKVFusionMatcher");
     StatelessKVFusionMatcher();
+
+private:
+    struct CachedNodes {
+        ov::Output<ov::Node> update_pos_ids;
+        std::shared_ptr<ov::Node> concat_kv_len;
+    };
+    std::map<ov::Output<ov::Node>, CachedNodes> m_seqk_cache;
 };
 
 class StatelessKVFusion : public ov::pass::GraphRewrite {
