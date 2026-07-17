@@ -6,8 +6,8 @@
 #include <memory>
 
 #include "intel_gpu/op/kv_cache.hpp"
-
 #include "intel_gpu/op/read_value.hpp"
+#include "intel_gpu/op/sdpa.hpp"
 #include "intel_gpu/plugin/common_utils.hpp"
 #include "openvino/core/node_vector.hpp"
 #include "openvino/core/rt_info.hpp"
@@ -448,7 +448,7 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
             return false;
         }
         const ov::Input<ov::Node>* next_input = nullptr;
-        std::shared_ptr<ov::op::v13::ScaledDotProductAttention> sdpa_node;
+        std::shared_ptr<op::SDPA> sdpa_node;
         for (auto& target_input : present_kv) {
             if (target_input.get_node() == result_node.get()) {
                 continue;
@@ -456,7 +456,7 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
             if (next_input) {
                 return false;
             }
-            sdpa_node = ov::as_type_ptr<ov::op::v13::ScaledDotProductAttention>(target_input.get_node()->shared_from_this());
+            sdpa_node = ov::as_type_ptr<op::SDPA>(target_input.get_node()->shared_from_this());
             if (sdpa_node && target_input.get_index() != 1 && target_input.get_index() != 2) {
                 return false;
             }
