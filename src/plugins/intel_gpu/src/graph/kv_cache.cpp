@@ -234,7 +234,9 @@ int64_t stateless_kv_inst::compute_update_offset(const kernel_impl_params& impl_
     OPENVINO_ASSERT(past_sequence_axis >= 0);
     const auto& past_dim = past_shape[static_cast<size_t>(past_sequence_axis)];
     OPENVINO_ASSERT(past_dim.is_static());
-    OPENVINO_ASSERT(present_dim_updated[0] <= past_dim.get_length(), "[GPU] present_seq_length shouldn't exceed max_seq_length");
+    GPU_DEBUG_TRACE_DETAIL << desc.id << " : present_len[" << present_dim_updated[0] << "] past_len[" << past_dim.get_length() << "] "
+                           << (present_dim_updated[0] <= past_dim.get_length() ? "update" : "concat") << std::endl;
+    // OPENVINO_ASSERT(present_dim_updated[0] <= past_dim.get_length(), "[GPU] present_seq_length shouldn't exceed max_seq_length");
 
     const auto& current_layout = impl_param.get_input_layout(1);
     const auto current_shape = current_layout.get_partial_shape();

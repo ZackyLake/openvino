@@ -325,16 +325,20 @@ std::shared_ptr<Node> StatelessKV::clone_with_new_inputs(const ov::OutputVector&
 }
 
 std::vector<ov::PartialShape> shape_infer(const StatelessKV* op, const std::vector<ov::PartialShape>& input_shapes) {
-    auto output_shape = input_shapes[0];
+    std::vector<ov::PartialShape> out_shapes(2, input_shapes[0]);
+    auto& full_shape = out_shapes[0];
+    auto& trim_shape = out_shapes[1];
 
     const auto concat_axis = ov::util::normalize(op->get_concat_axis(), input_shapes[0].size());
     if (input_shapes[0][concat_axis].is_static() && input_shapes[1][concat_axis].is_static()) {
         const auto update_offset = op->get_update_offset();
         const auto updated_dim = input_shapes[1][concat_axis] + update_offset;
-        OPENVINO_ASSERT(updated_dim.get_length() <= input_shapes[0][concat_axis].get_length());
-        output_shape[concat_axis] = updated_dim;
+        // OPENVINO_ASSERT(updated_dim.get_length() <= input_shapes[0][concat_axis].get_length());
+        trim_shape[concat_axis] = updated_dim;
+        if (updated_dim.get_length() > full_shape[concat_axis].get_length()) {
+            full_shape[concat_axis] = updated_dim;
+        }
     }
-    std::vector<ov::PartialShape> out_shapes{input_shapes[0], output_shape};
 
     return out_shapes;
 }
