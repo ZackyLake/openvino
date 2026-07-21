@@ -95,7 +95,7 @@ public:
 private:
     struct CachedNodes {
         ov::Output<ov::Node> update_pos_ids;
-        std::shared_ptr<ov::Node> concat_kv_len;
+        ov::Output<ov::Node> concat_kv_len;
     };
     std::map<ov::Output<ov::Node>, CachedNodes> m_seqk_cache;
 };

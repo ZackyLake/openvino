@@ -213,20 +213,20 @@ stateless_kv_inst::typed_primitive_inst(network& network, const stateless_kv_nod
     update_output_memory();
 }
 
-int64_t stateless_kv_inst::compute_update_offset(const kernel_impl_params& impl_param, const stateless_kv& desc) {
+std::optional<int64_t> stateless_kv_inst::compute_update_offset(const kernel_impl_params& impl_param, const stateless_kv& desc) {
     const auto mem_dep_it = impl_param.memory_deps.find(2);
     if (mem_dep_it == impl_param.memory_deps.end())
-        return 0;
+        return {};
 
-    const auto& present_seq_len_mem = mem_dep_it->second;
-    const auto present_seq_len_layout = present_seq_len_mem->get_layout();
-    if (present_seq_len_layout.count() == 0)
-        return 0;
+    const auto& seq_len_mem = mem_dep_it->second;
+    const auto seq_len_layout = seq_len_mem->get_layout();
+    if (seq_len_layout.count() == 0)
+        return {};
 
-    OPENVINO_ASSERT(present_seq_len_layout.count() == 1);
-    cldnn::mem_lock<uint8_t, mem_lock_type::read> present_seq_len_mem_lock(present_seq_len_mem, impl_param.get_stream());
-    auto present_seq_len_tensor = make_tensor(present_seq_len_layout, present_seq_len_mem_lock.data());
-    const auto present_dim_updated = ov::get_tensor_data_as<int64_t>(present_seq_len_tensor);
+    OPENVINO_ASSERT(seq_len_layout.count() == 1);
+    cldnn::mem_lock<uint8_t, mem_lock_type::read> seq_len_mem_lock(seq_len_mem, impl_param.get_stream());
+    auto seq_len_tensor = make_tensor(seq_len_layout, seq_len_mem_lock.data());
+    const auto seq_len = ov::get_tensor_data_as<int64_t>(seq_len_tensor)[0];
 
     const auto& past_layout = impl_param.get_input_layout(0);
     const auto past_shape = past_layout.get_partial_shape();
@@ -234,9 +234,6 @@ int64_t stateless_kv_inst::compute_update_offset(const kernel_impl_params& impl_
     OPENVINO_ASSERT(past_sequence_axis >= 0);
     const auto& past_dim = past_shape[static_cast<size_t>(past_sequence_axis)];
     OPENVINO_ASSERT(past_dim.is_static());
-    GPU_DEBUG_TRACE_DETAIL << desc.id << " : present_len[" << present_dim_updated[0] << "] past_len[" << past_dim.get_length() << "] "
-                           << (present_dim_updated[0] <= past_dim.get_length() ? "update" : "concat") << std::endl;
-    // OPENVINO_ASSERT(present_dim_updated[0] <= past_dim.get_length(), "[GPU] present_seq_length shouldn't exceed max_seq_length");
 
     const auto& current_layout = impl_param.get_input_layout(1);
     const auto current_shape = current_layout.get_partial_shape();
@@ -245,10 +242,21 @@ int64_t stateless_kv_inst::compute_update_offset(const kernel_impl_params& impl_
     const auto& current_dim = current_shape[static_cast<size_t>(current_sequence_axis)];
     OPENVINO_ASSERT(current_dim.is_static());
 
-    const auto update_offset = present_dim_updated[0] - current_dim.get_length();
-    OPENVINO_ASSERT(update_offset >= 0, "[GPU] new_token_data shouldn't exceed present_seq_length");
+    int64_t past_seq_len = 0;
+    int64_t present_seq_len = 0;
+    if (desc.is_present_len) {
+        present_seq_len = seq_len;
+        past_seq_len = present_seq_len - current_dim.get_length();
+    } else {
+        past_seq_len = seq_len;
+        present_seq_len = past_seq_len + current_dim.get_length();
+    }
+    GPU_DEBUG_TRACE_DETAIL << desc.id << " : " << (desc.is_present_len ? "present" : "past") << "_len[" << seq_len << "] cur_len[" << current_dim.get_length()
+                           << "] past_tensor[" << past_dim.get_length() << "] " << (present_seq_len <= past_dim.get_length() ? "update" : "concat")
+                           << std::endl;
+    OPENVINO_ASSERT(past_seq_len >= 0, "[GPU] new_token_data shouldn't exceed present_seq_length");
 
-    return update_offset;
+    return past_seq_len;
 }
 
 layout stateless_kv_inst::calc_output_layout(const stateless_kv_node& node, kernel_impl_params const& impl_param) {
@@ -268,6 +276,7 @@ std::vector<layout> stateless_kv_inst::calc_output_layouts(stateless_kv_node con
     ov::intel_gpu::op::StatelessKV op;
     op.set_output_size(2);
     op.set_concat_axis(concat_axis);
+    op.set_is_present_len(desc->is_present_len);
     op.set_update_offset(stateless_kv_inst::compute_update_offset(impl_param, *desc));
 
     auto output_shapes = shape_infer(&op, input_shapes);
@@ -296,6 +305,7 @@ std::string stateless_kv_inst::to_string(const stateless_kv_node& node) {
     json_composite stateless_kv_info;
     stateless_kv_info.add("input id", node.input().id());
     stateless_kv_info.add("concat axis", node.get_primitive()->concat_axis);
+    stateless_kv_info.add("is present len", node.get_primitive()->is_present_len);
     node_info->add("stateless_kv info", stateless_kv_info);
     std::stringstream primitive_description;
     node_info->dump(primitive_description);

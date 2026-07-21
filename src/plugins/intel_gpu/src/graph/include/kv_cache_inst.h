@@ -145,7 +145,7 @@ public:
 
     bool get_is_inplace() const { return m_is_inplace; }
 
-    static int64_t compute_update_offset(const kernel_impl_params& impl_param, const stateless_kv& desc);
+    static std::optional<int64_t> compute_update_offset(const kernel_impl_params& impl_param, const stateless_kv& desc);
 
     typed_primitive_inst(network& network, const stateless_kv_node& desc);
     typed_primitive_inst(network& network) : parent(network) {}

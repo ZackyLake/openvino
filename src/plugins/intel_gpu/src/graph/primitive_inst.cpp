@@ -749,9 +749,6 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
     OV_ITT_SCOPED_TASK(ov::intel_gpu::itt::domains::intel_gpu_plugin, openvino::itt::handle("realloc_outputs: " + id()));
     GPU_DEBUG_PROFILED_STAGE(instrumentation::pipeline_stage::memory_allocation);
 
-    if (get_node().is_type<stateless_kv>())
-        return;
-
     const auto& users = get_user_insts();
     if (users.size() == 1 && users.front()->get_node().is_type<concatenation>() && users.front()->get_node().is_runtime_skippable()) {
         auto concat_inst = users.front();
@@ -769,7 +766,7 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
     // Update param if fake_alignment is available
     auto updated_params = get_fake_aligned_params_if_possible(get_node(), *_impl_params);
 
-    const auto actual_layouts = updated_params.output_layouts;
+    const auto& actual_layouts = updated_params.output_layouts;
     OPENVINO_ASSERT(actual_layouts[0].is_static(), "[GPU] Can't realloc mem for dynamic layout");
 
     if (users.size() == 1 && users.front()->get_node().is_type<reorder>() && users.front()->can_be_optimized()) {
@@ -792,6 +789,46 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
     // input_layout node is supposed to always use external memory in dynamic case
     if (get_node().is_type<input_layout>())
         return;
+
+    
+    if (get_node().is_type<stateless_kv>()) {
+        const auto output_it = std::find_if(users.begin(), users.end(), [](primitive_inst* user) {
+            return user->is_output();
+        });
+        OPENVINO_ASSERT(output_it != users.end(), "[GPU] stateless_kv should directly connect to an output");
+
+        auto& result = **output_it;
+        //result.set_can_be_optimized(false);
+        if (result.is_dynamic()) {
+            if (!result._update_shape_done_by_other) {
+                result.update_shape();
+                result._update_shape_done_by_other = true;
+            }
+            result.realloc_if_needed();
+        } else if (!result.output_memory_ptr()) {
+            result.realloc_if_needed();
+        }
+
+        const auto present_tensor = result.output_memory_ptr();
+        OPENVINO_ASSERT(present_tensor, "[GPU] Output memory of ", result.id(), " is not prepared for stateless_kv node ", id());
+        const auto& present_layout = present_tensor->get_layout();
+        const auto& target_layout = _impl_params->get_output_layout(1);
+        OPENVINO_ASSERT(present_layout.is_static() && target_layout.is_static());
+        const auto past_tensor = input_memory_ptr(0);
+        const auto is_same = (past_tensor && present_tensor) ? _network.get_engine().is_the_same_buffer(*present_tensor, *past_tensor) : false;
+        GPU_DEBUG_TRACE_DETAIL << id() << ": input[" << past_tensor->buffer_ptr() << "] and output[" << present_tensor->buffer_ptr() << "](" << result.id()
+                               << ") same:" << is_same << std::endl;
+        GPU_DEBUG_TRACE_DETAIL << id() << ": input layout[" << past_tensor->get_layout().to_short_string() << "] and output layout["
+                               << present_layout.to_short_string() << "](" << result.id() << ") [" << target_layout.to_short_string() << "]" << std::endl;
+        // const auto target_axis = get_typed_desc<stateless_kv>()->concat_axis;
+        // OPENVINO_ASSERT(present_layout.get_dim(target_axis) >= target_layout.get_dim(target_axis));
+
+        _outputs[0] = present_tensor;
+        _outputs[1] = get_network().get_engine().reinterpret_buffer(*present_tensor, target_layout);
+        this->_mem_allocated = false;
+        result.set_flag(ExecutionFlags::SKIP);
+        return;
+    }
 
     // Forward probe: walk through single-user optimized chains to find an output
     // node with an external output memory block (ext_block).  If found, use the
@@ -825,6 +862,17 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
             cursor = next;
         }
     }
+    if (is_output()) {
+        const auto output_tensor = output_memory_ptr();
+        auto* ext_block = get_network().get_output_memory_block(id());
+        if (!output_tensor) {
+            GPU_DEBUG_TRACE_DETAIL << id() << ": output is nullptr, ext_block: " << (ext_block ? ext_block->rawPtr() : nullptr) << std::endl;
+        } else {
+            GPU_DEBUG_TRACE_DETAIL << id() << ": output[" << output_tensor->buffer_ptr() << "] layout(" << output_tensor->get_layout().to_short_string()
+                                   << ") extblock[" << (ext_block ? ext_block->rawPtr() : nullptr) << "]" << std::endl;
+        }
+    }
+    GPU_DEBUG_TRACE_DETAIL << id() << ": _max_output_layout_count[0]" << _max_output_layout_count[0] << std::endl;
 
     auto& sp = *get_network().get_shape_predictor();
     std::vector<size_t> dt_sizes_in_B;
@@ -915,10 +963,12 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
             return;
         }
     }
+    GPU_DEBUG_TRACE_DETAIL << id() << ": _max_output_layout_count[0]" << _max_output_layout_count[0] << std::endl;
 
     // Update output layout with respect to FC's fake alignment
     auto updated_layouts = actual_layouts;
-    std::vector<cldnn::primitive_inst *> user_insts;
+    GPU_DEBUG_TRACE_DETAIL << id() << ": updated_layouts[0]" << updated_layouts[0].to_short_string() << std::endl;
+    std::vector<cldnn::primitive_inst*> user_insts;
     {
         const auto& user_insts_origin = get_user_insts();
         for (auto& user : user_insts_origin) {
@@ -1056,6 +1106,8 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
         }
     }
 
+    GPU_DEBUG_TRACE_DETAIL << id() << ": updated_layouts[0]" << updated_layouts[0].to_short_string() << std::endl;
+    GPU_DEBUG_TRACE_DETAIL << id() << ": _max_output_layout_count[0]" << _max_output_layout_count[0] << std::endl;
     static const auto inplacekv = []() {
         const auto txt = std::getenv("inplacekv");
         return !(txt && txt == std::string_view("false"));
@@ -1092,6 +1144,7 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
             }
         }
     }
+
     // update layout to ensure that it respects paddings for correct allocation size
     if (_node_output_layout.data_padding.is_dynamic()) {
         auto update_padding = [](layout& orig_layout) {
@@ -1142,6 +1195,8 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
             _max_output_layout_count[i] = 0;
         }
     }
+    GPU_DEBUG_TRACE_DETAIL << id() << ": updated_layouts[0]" << updated_layouts[0].to_short_string() << std::endl;
+    GPU_DEBUG_TRACE_DETAIL << id() << ": _max_output_layout_count[0]" << _max_output_layout_count[0] << std::endl;
 
     // Handle runtime dynamic concat optimization
     if (get_node().is_type<concatenation>() && can_be_optimized() && _allocation_done_by_other) {
@@ -2221,6 +2276,11 @@ void primitive_inst::prepare_primitive() {
             }
         }
 
+        // StatelessKV uses next output's memory, may change even if the input shapes haven't been changed
+        if (get_node().is_type<stateless_kv>() && !get_flag(ExecutionFlags::IMPL_CHANGED)) {
+            realloc_if_needed(prev_execution_skipped);
+        }
+
         // Paged Attention may require dispatch data update and internal buffers reallocation
         // even if the input shapes haven't been changed
         if (get_node().is_type<paged_attention>() && !get_flag(ExecutionFlags::IMPL_CHANGED) && _impl->requires_update(*this, *_impl_params)) {
@@ -2235,44 +2295,6 @@ void primitive_inst::prepare_primitive() {
     }
     _update_shape_done_by_other = false; // reset
     OPENVINO_ASSERT(_impl != nullptr, "[GPU] Implementation is nullptr for ", primitive_id,  " primitive");
-
-    if (get_node().is_type<stateless_kv>()) {
-        const auto& users = get_user_insts();
-        const auto output_it = std::find_if(users.begin(), users.end(), [](primitive_inst* user) {
-            return user->is_output();
-        });
-        OPENVINO_ASSERT(output_it != users.end(), "[GPU] stateless_kv should directly connect to an output");
-
-        auto& result = **output_it;
-        result.set_can_be_optimized(false);
-        if (result.is_dynamic()) {
-            if (!result._update_shape_done_by_other) {
-                result.update_shape();
-                result._update_shape_done_by_other = true;
-            }
-            result.realloc_if_needed();
-        } else if (!result.output_memory_ptr()) {
-            result.realloc_if_needed();
-        }
-
-        const auto present_tensor = result.output_memory_ptr();
-        OPENVINO_ASSERT(present_tensor, "[GPU] Output memory of ", result.id(), " is not prepared for stateless_kv node ", id());
-        const auto& present_layout = present_tensor->get_layout();
-        const auto& target_layout = _impl_params->get_output_layout(1);
-        OPENVINO_ASSERT(present_layout.is_static() && target_layout.is_static());
-        const auto past_tensor = input_memory_ptr(0);
-        const auto is_same = (past_tensor && present_tensor) ? _network.get_engine().is_the_same_buffer(*present_tensor, *past_tensor) : false;
-        GPU_DEBUG_TRACE_DETAIL << id() << ": input[" << past_tensor->buffer_ptr() << "] and output[" << present_tensor->buffer_ptr() << "](" << result.id()
-                               << ") same:" << is_same << std::endl;
-        GPU_DEBUG_TRACE_DETAIL << id() << ": input layout[" << past_tensor->get_layout().to_short_string() << "] and output layout["
-                               << present_layout.to_short_string() << "](" << result.id() << ") [" << target_layout.to_short_string() << "]" << std::endl;
-        //const auto target_axis = get_typed_desc<stateless_kv>()->concat_axis;
-        //OPENVINO_ASSERT(present_layout.get_dim(target_axis) >= target_layout.get_dim(target_axis));
-
-        _outputs[0] = present_tensor;
-        _outputs[1] = get_network().get_engine().reinterpret_buffer(*present_tensor, target_layout);
-        result.set_flag(ExecutionFlags::SKIP);
-    }
 
     // Re-acquire output memory when _outputs[0] was cleared by
     // invalidate_ext_block_compute_nodes (double-buffer flip).
