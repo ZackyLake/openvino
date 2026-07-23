@@ -421,6 +421,7 @@ void primitive_inst::update_shape() {
     if (!get_node().is_type<kv_cache>() && !get_node().is_type<strided_slice>() && !input_shape_changed && _impl_params->get_output_layout().is_static())
         return;
 
+    std::vector<primitive_inst*> in_order_waits;
     std::vector<event::ptr> dependencies_events;
     auto queue_type = get_network().get_stream().get_queue_type();
     bool has_runtime_deps = false;
@@ -445,8 +446,38 @@ void primitive_inst::update_shape() {
             continue;
         }
 
+        if (get_node().is_constant()) {
+            continue;
+        }
+
+        in_order_waits.push_back(dep);
+
         if (!get_node().is_type<shape_of>() &&
         !(dep->get_node().get_selected_impl() ? dep->get_node().get_selected_impl()->is_cpu() : dep->get_node().get_preferred_impl_type() == impl_types::cpu)) {
+
+            if (queue_type == QueueTypes::in_order) {
+                if (dep->get_flag(ExecutionFlags::ALREADY_WAITED)) {
+                    GPU_DEBUG_TRACE_DETAIL << id() << ": shape infer dependency " << i << " already waited, skip\n";
+                    continue;
+                } else {
+                    GPU_DEBUG_TRACE_DETAIL << id() << ": shape infer dependency " << i << " need flush to wait\n";
+
+                    static const auto skipwait = []() {
+                        const auto txt = std::getenv("skipwait");
+                        return txt && txt == std::string_view("true");
+                    }();
+                    if (skipwait) {
+                        auto event = dep->get_impl_params()->out_event;
+                        if (event && event->is_set()) {
+                            //printf("[update_shape] (%s)'s dep %zu (%s) already set. skip\n", id().c_str(), i, dep->get_node().id().c_str());
+                            GPU_DEBUG_TRACE_DETAIL << id() << ": shape infer dependency " << i << " already set, skip\n ";
+                            continue;
+                        }
+                    }
+                }
+            }
+            
+
             has_runtime_deps = true;
 
             // Events may be not created for in-order queue, so take them for OOO queue only
@@ -460,11 +491,16 @@ void primitive_inst::update_shape() {
 
     if (has_runtime_deps) {
         OV_ITT_SCOPED_TASK(ov::intel_gpu::itt::domains::intel_gpu_plugin, openvino::itt::handle("update_shape_sync: " + id()));
-        GPU_DEBUG_TRACE_DETAIL << "runtime synchronization for " << id() << " shape inference\n";
+        GPU_DEBUG_TRACE_DETAIL << "runtime synchronization [" << (queue_type == QueueTypes::out_of_order ? "OoO Queue" : "Inorder Queue") << "] for " << id()
+                               << " shape inference: " << dependencies_events.size() << " events\n";
+
         if (!dependencies_events.empty() && queue_type == QueueTypes::out_of_order) {
             get_network().get_stream().wait_for_events(dependencies_events);
         } else if (queue_type == QueueTypes::in_order) {
             get_network().get_stream().finish();
+            for (auto& dep : in_order_waits) {
+                dep->set_flag(ExecutionFlags::ALREADY_WAITED);
+            }
         }
     }
 

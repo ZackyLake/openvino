@@ -25,12 +25,13 @@ struct program;
 struct network;
 
 
-struct ExecutionFlags : public std::bitset<5> {
+struct ExecutionFlags : public std::bitset<6> {
     static const size_t SHAPE_CHANGED = 0;
     static const size_t IMPL_CHANGED = 1;
     static const size_t MEMORY_CHANGED = 2;
     static const size_t ARG_UPDATE_REQUIRED = 3;
     static const size_t SKIP = 4;
+    static const size_t ALREADY_WAITED = 5;
 };
 
 struct kernel_impl_params final {
