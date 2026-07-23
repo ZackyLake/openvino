@@ -7,6 +7,7 @@
 #include "intel_gpu/runtime/debug_configuration.hpp"
 #include "intel_gpu/runtime/memory.hpp"
 #include "multi_stage_primitive.hpp"
+#include "primitive_base.hpp"
 
 #include "kv_cache_inst.h"
 #include "dynamic_quantize_inst.h"
@@ -18,6 +19,8 @@
 #include "dynamic_quantize/dynamic_quantize_kernel_kv_cache.h"
 #include "scatter_update/scatter_elements_update_kernel_selector.h"
 #include "scatter_update/scatter_elements_update_kernel_ref.h"
+#include "scatter_update/scatter_update_kernel_selector.h"
+#include "scatter_update/scatter_update_kernel_ref.h"
 #include "openvino/core/dimension.hpp"
 
 #include <limits.h>
@@ -51,6 +54,30 @@ kernel_selector::concat_axis convert_axis(int64_t axis, size_t rank) {
     }
 
     return kernel_selector::concat_axis::FEATURE;  // shouldn't get here
+}
+
+kernel_selector::scatter_update_axis convert_scatter_axis(int64_t axis, size_t rank) {
+    auto cldnn_axis = axis >= 0 ? axis : axis + static_cast<int64_t>(rank);
+    if (cldnn_axis >= static_cast<int64_t>(rank))
+        OPENVINO_THROW("stateless_kv axis exceeds number of dimensions");
+
+    if (cldnn_axis >= 2) {
+        auto spatial_axis = cldnn_axis - 2;
+        auto spatial_size = std::max<size_t>(rank, 4) - 2;
+        cldnn_axis = spatial_size - spatial_axis - 1 + 2;
+    }
+
+    switch (cldnn_axis) {
+        case 0: return kernel_selector::scatter_update_axis::BATCH;
+        case 1: return kernel_selector::scatter_update_axis::FEATURE;
+        case 2: return kernel_selector::scatter_update_axis::X;
+        case 3: return kernel_selector::scatter_update_axis::Y;
+        case 4: return kernel_selector::scatter_update_axis::Z;
+        case 5: return kernel_selector::scatter_update_axis::W;
+        default: OPENVINO_THROW("Unsupported stateless_kv axis: ", axis);
+    }
+
+    return kernel_selector::scatter_update_axis::X;
 }
 
 }  // namespace
@@ -696,6 +723,116 @@ struct kv_cache_impl : multi_stage_primitive<kv_cache> {
     }
 };
 
+struct stateless_kv_impl : typed_primitive_impl_ocl<stateless_kv> {
+    using parent = typed_primitive_impl_ocl<stateless_kv>;
+    using parent::parent;
+    using kernel_selector_t = kernel_selector::scatter_update_kernel_selector;
+    using kernel_params_t = kernel_selector::scatter_update_params;
+
+    DECLARE_OBJECT_TYPE_SERIALIZATION(cldnn::ocl::stateless_kv_impl)
+
+    std::unique_ptr<primitive_impl> clone() const override {
+        return make_deep_copy<stateless_kv_impl, kernel_params_t>(*this);
+    }
+
+    void load(BinaryInputBuffer& ib) override {
+        parent::load(ib);
+        if (is_dynamic() && _kernel_data.kernelName.length() != 0) {
+            auto& kernel_selector = kernel_selector_t::Instance();
+            auto kernel_impl = kernel_selector.GetImplementation(_kernel_data.kernelName);
+            kernel_impl->GetUpdateDispatchDataFunc(_kernel_data);
+        }
+    }
+
+    kernel_arguments_data get_arguments(const typed_primitive_inst<stateless_kv>& instance) const override {
+        kernel_arguments_data args;
+        args.inputs.push_back(instance.input_memory_ptr(0)); // past
+        args.inputs.push_back(instance.input_memory_ptr(3)); // pos_idx
+        args.inputs.push_back(instance.input_memory_ptr(1)); // new_token_data
+        args.outputs.push_back(instance.output_memory_ptr(0));
+        args.shape_info = instance.shape_info_memory_ptr();
+        return args;
+    }
+
+    static kernel_params_t get_kernel_params(const kernel_impl_params& impl_param, bool is_shape_agnostic = false) {
+        const auto& primitive = impl_param.typed_desc<stateless_kv>();
+        GPU_DEBUG_TRACE_DETAIL << primitive->id << ": get_kernel_params in[" << impl_param.get_input_layout(0).to_short_string() << "] out["
+                               << impl_param.get_output_layout(0).to_short_string() << "][" << impl_param.get_output_layout(1).to_short_string() << "]"
+                               << std::endl;
+        auto params = get_default_params<kernel_selector::scatter_update_params>(impl_param, is_shape_agnostic);
+
+        params.axis = convert_scatter_axis(primitive->concat_axis, impl_param.get_input_layout(0).get_rank());
+        params.inputs.resize(3);
+        params.inputs[0] = convert_data_tensor(impl_param.get_input_layout(0));
+        params.inputs[1] = convert_data_tensor(impl_param.get_input_layout(3));
+        params.inputs[2] = convert_data_tensor(impl_param.get_input_layout(1));
+        params.outputs.resize(1);
+        params.outputs[0] = convert_data_tensor(impl_param.get_output_layout(0));
+        params.is_inplace = false;
+        
+        const auto& in_offsets_map = impl_param.in_port_to_shape_info_offset;
+        const auto& out_offsets_map = impl_param.out_port_to_shape_info_offset;
+
+        if (!in_offsets_map.empty() && !out_offsets_map.empty()) {
+            std::map<size_t, size_t> in_tensor_to_offset_map = {
+                {0, in_offsets_map.at(0)},
+                {1, in_offsets_map.at(3)},
+                {2, in_offsets_map.at(1)},
+            };
+            std::map<size_t, size_t> out_tensor_to_offset_map = {
+                {0, out_offsets_map.at(0)},
+            };
+            params.set_dynamic_shape_offsets(in_tensor_to_offset_map, out_tensor_to_offset_map);
+
+        }
+
+        return params;
+    }
+
+    static std::unique_ptr<primitive_impl> create(const typed_program_node<stateless_kv>& arg, const kernel_impl_params& impl_param) {
+        auto params = static_canonicalize_shapes(impl_param);
+        // internal calls set_dynamic_shape_offsets
+        auto kernel_params = get_kernel_params(params, impl_param.is_dynamic());
+        kernel_params.is_shape_agnostic = impl_param.is_dynamic();
+
+        auto& kernel_selector = kernel_selector_t::Instance();
+        auto best_kernel = kernel_selector.get_best_kernel(kernel_params);
+
+        return std::make_unique<stateless_kv_impl>(best_kernel);
+    }
+
+    void update_dispatch_data(const kernel_impl_params& impl_param) override {
+        // If model loaded from cache, params are not initialized, so we create a new object and reuse it in the future
+        if (_kernel_data.params == nullptr) {
+            _kernel_data.params = std::make_shared<kernel_params_t>(get_kernel_params(impl_param, true));
+        } else {
+            static_cast<kernel_params_t&>(*_kernel_data.params) = get_kernel_params(impl_param, true);
+        }
+        (_kernel_data.update_dispatch_data_func)(*_kernel_data.params, _kernel_data);
+    }
+
+    event::ptr execute_impl(const std::vector<event::ptr>& events, stateless_kv_inst& instance) override {
+        if (!_kernel_data.update_dispatch_data_func && _kernel_data.kernelName.length() != 0) {
+            auto& kernel_selector = kernel_selector_t::Instance();
+            auto kernel_impl = kernel_selector.GetImplementation(_kernel_data.kernelName);
+            kernel_impl->GetUpdateDispatchDataFunc(_kernel_data);
+        }
+
+        if (_kernel_data.params == nullptr) {
+            GPU_DEBUG_TRACE_DETAIL << instance.id() << " execute_impl has no prim_params, allocating" << std::endl;
+            _kernel_data.params = std::make_shared<kernel_params_t>(get_kernel_params(*instance.get_impl_params(), is_dynamic()));
+        }
+
+        instance.update_output_memory();
+        auto& prim_params = static_cast<kernel_params_t&>(*_kernel_data.params);
+        if (prim_params.is_inplace != instance.get_is_inplace()) {
+            prim_params.is_inplace = instance.get_is_inplace();
+            (_kernel_data.update_dispatch_data_func)(*_kernel_data.params, _kernel_data);
+        }
+        return parent::execute_impl(events, instance);
+    }
+};
+
 namespace detail {
 
 attach_kv_cache_impl::attach_kv_cache_impl() {
@@ -714,9 +851,18 @@ attach_kv_cache_impl::attach_kv_cache_impl() {
                                            formats);
 }
 
+attach_stateless_kv_impl::attach_stateless_kv_impl() {
+    auto types = { data_types::i8, data_types::f16, data_types::f32 };
+    auto formats = { format::bfyx };
+    implementation_map<stateless_kv>::add(impl_types::ocl, shape_types::dynamic_shape, stateless_kv_impl::create, types, formats);
+    implementation_map<stateless_kv>::add(impl_types::ocl, shape_types::static_shape, stateless_kv_impl::create, types, formats);
+}
+
 }  // namespace detail
 }  // namespace ocl
 }  // namespace cldnn
 
 BIND_BINARY_BUFFER_WITH_TYPE(cldnn::ocl::kv_cache_impl)
+BIND_BINARY_BUFFER_WITH_TYPE(cldnn::ocl::stateless_kv_impl)
 BIND_BINARY_BUFFER_WITH_TYPE(cldnn::kv_cache)
+BIND_BINARY_BUFFER_WITH_TYPE(cldnn::stateless_kv)

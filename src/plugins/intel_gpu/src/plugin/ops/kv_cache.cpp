@@ -14,6 +14,7 @@ namespace op {
 namespace internal {
 using KVCache = ov::intel_gpu::op::KVCache;
 using KVCacheCompressed = ov::intel_gpu::op::KVCacheCompressed;
+using StatelessKV = ov::intel_gpu::op::StatelessKV;
 }  // namespace internal
 }  // namespace op
 }  // namespace ov
@@ -65,9 +66,22 @@ void CreateKVCacheCompressedOp(ProgramBuilder& p, const std::shared_ptr<ov::op::
     p.add_primitive(*op, prim);
 }
 
+void CreateStatelessKVOp(ProgramBuilder& p, const std::shared_ptr<ov::op::internal::StatelessKV>& op) {
+    validate_inputs_count(op, {4});
+    auto inputs = p.GetInputInfo(op);
+    int64_t rank = op->get_input_partial_shape(0).size();
+    auto prim = cldnn::stateless_kv(layer_type_name_ID(op), inputs, ov::util::normalize(op->get_concat_axis(), rank), op->get_is_present_len());
+
+    prim.num_outputs = op->get_output_size();
+    prim.output_data_types = get_output_data_types(op);
+
+    p.add_primitive(*op, prim);
+}
+
 } // namespace
 
 REGISTER_FACTORY_IMPL(internal, KVCache);
 REGISTER_FACTORY_IMPL(internal, KVCacheCompressed);
+REGISTER_FACTORY_IMPL(internal, StatelessKV);
 
 }  // namespace ov::intel_gpu

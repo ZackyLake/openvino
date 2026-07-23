@@ -789,6 +789,46 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
     if (get_node().is_type<input_layout>())
         return;
 
+    
+    if (get_node().is_type<stateless_kv>()) {
+        const auto output_it = std::find_if(users.begin(), users.end(), [](primitive_inst* user) {
+            return user->is_output();
+        });
+        OPENVINO_ASSERT(output_it != users.end(), "[GPU] stateless_kv should directly connect to an output");
+
+        auto& result = **output_it;
+        //result.set_can_be_optimized(false);
+        if (result.is_dynamic()) {
+            if (!result._update_shape_done_by_other) {
+                result.update_shape();
+                result._update_shape_done_by_other = true;
+            }
+            result.realloc_if_needed();
+        } else if (!result.output_memory_ptr()) {
+            result.realloc_if_needed();
+        }
+
+        const auto present_tensor = result.output_memory_ptr();
+        OPENVINO_ASSERT(present_tensor, "[GPU] Output memory of ", result.id(), " is not prepared for stateless_kv node ", id());
+        const auto& present_layout = present_tensor->get_layout();
+        const auto& target_layout = _impl_params->get_output_layout(1);
+        OPENVINO_ASSERT(present_layout.is_static() && target_layout.is_static());
+        const auto past_tensor = input_memory_ptr(0);
+        const auto is_same = (past_tensor && present_tensor) ? _network.get_engine().is_the_same_buffer(*present_tensor, *past_tensor) : false;
+        GPU_DEBUG_TRACE_DETAIL << id() << ": input[" << past_tensor->buffer_ptr() << "] and output[" << present_tensor->buffer_ptr() << "](" << result.id()
+                               << ") same:" << is_same << std::endl;
+        GPU_DEBUG_TRACE_DETAIL << id() << ": input layout[" << past_tensor->get_layout().to_short_string() << "] and output layout["
+                               << present_layout.to_short_string() << "](" << result.id() << ") [" << target_layout.to_short_string() << "]" << std::endl;
+        // const auto target_axis = get_typed_desc<stateless_kv>()->concat_axis;
+        // OPENVINO_ASSERT(present_layout.get_dim(target_axis) >= target_layout.get_dim(target_axis));
+
+        _outputs[0] = present_tensor;
+        _outputs[1] = get_network().get_engine().reinterpret_buffer(*present_tensor, target_layout);
+        this->_mem_allocated = false;
+        result.set_flag(ExecutionFlags::SKIP);
+        return;
+    }
+
     // Forward probe: walk through single-user optimized chains to find an output
     // node with an external output memory block (ext_block).  If found, use the
     // ext_block memory directly so this node's kernel writes into it, achieving
@@ -2175,6 +2215,11 @@ void primitive_inst::prepare_primitive() {
                 update_weights();
                 realloc_if_needed(prev_execution_skipped);
             }
+        }
+
+        // StatelessKV uses next output's memory, may change even if the input shapes haven't been changed
+        if (get_node().is_type<stateless_kv>() && !get_flag(ExecutionFlags::IMPL_CHANGED)) {
+            realloc_if_needed(prev_execution_skipped);
         }
 
         // Paged Attention may require dispatch data update and internal buffers reallocation
