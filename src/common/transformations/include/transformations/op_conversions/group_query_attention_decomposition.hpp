@@ -34,6 +34,7 @@ private:
     struct CachedNodes {
         ov::Output<ov::Node> pos_ids;
         ov::Output<ov::Node> kv_slices;
+        std::shared_ptr<ov::Node> past_kv_len;
         std::shared_ptr<ov::Node> concat_kv_len;
         std::map<ov::Output<ov::Node>, ov::Output<ov::Node>> rotary_cache;
     };

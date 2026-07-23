@@ -14,11 +14,9 @@
 #include "openvino/op/concat.hpp"
 #include "openvino/op/constant.hpp"
 #include "openvino/op/convert.hpp"
-#include "openvino/op/cum_sum.hpp"
 #include "openvino/op/gather.hpp"
 #include "openvino/op/greater.hpp"
 #include "openvino/op/greater_eq.hpp"
-#include "openvino/op/less.hpp"
 #include "openvino/op/multiply.hpp"
 #include "openvino/op/range.hpp"
 #include "openvino/op/reshape.hpp"
@@ -66,11 +64,6 @@ ov::pass::GroupQueryAttentionDecomposition::GroupQueryAttentionDecomposition() {
 
 ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
     std::shared_ptr<ov::op::internal::GroupQueryAttention> node) {
-    static const auto inplacekv = []() {
-        const auto txt = std::getenv("inplacekv");
-        return !(txt && txt == std::string_view("false"));
-    }();
-
     const auto num_heads = node->get_num_heads();
     const auto kv_num_heads = node->get_kv_num_heads();
     const auto scale = node->get_scale();
@@ -122,50 +115,39 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
 
     ov::Output<ov::Node> q_pos_ids;
     ov::Output<ov::Node> kv_slices;
+    std::shared_ptr<ov::Node> past_kv_len;
     std::shared_ptr<ov::Node> concat_kv_len;
     static const auto gqareuse = []() {
         const auto txt = std::getenv("gqareuse");
         return !(txt && txt == std::string_view("false"));
     }();
-    static const auto rangeids = []() {
-        const auto txt = std::getenv("rangeids");
-        return !(txt && txt == std::string_view("false"));
-    }();
     CachedNodes* cache = nullptr;
     if (const auto it = m_seqk_cache.find(seqlens_k); gqareuse && it != m_seqk_cache.end()) {
-        // printf("Reuse GQA-slice[%s]![%s] reuses seq[%s]\n",
-        //        rangeids ? "range" : "cumsum",
+        // printf("Reuse GQA-slice![%s] reuses seq[%s]\n",
         //        node->get_friendly_name().c_str(),
         //        seqlens_k.get_node()->get_friendly_name().c_str());
         q_pos_ids = it->second.pos_ids;
         kv_slices = it->second.kv_slices;
+        past_kv_len = it->second.past_kv_len;
         concat_kv_len = it->second.concat_kv_len;
         cache = &it->second;
     } else {
-        std::shared_ptr<ov::Node> q_len_idx;
-        if (rangeids) {
-            q_len_idx = register_new_node<v4::Range>(zero_without_shape,
-                                                     curr_seqlen_scalar,
-                                                     one_without_shape,
-                                                     ov::element::i64);
-        } else {
-            auto q_bfy = register_new_node<v8::Gather>(Q, zero_without_shape, axis3);
-            auto q_fy = register_new_node<v8::Gather>(q_bfy, zero_without_shape, zero_without_shape);
-            auto q_y = register_new_node<v8::Gather>(q_fy, zero_without_shape, zero_without_shape);
-            auto zeros_y_bool = register_new_node<v1::Less>(q_y, q_y);
-            auto zeros_y = register_new_node<v0::Convert>(zeros_y_bool, ov::element::i64);
-            auto ones_y = register_new_node<v1::Add>(zeros_y, one_without_shape);
-            q_len_idx = register_new_node<v0::CumSum>(ones_y, zero_without_shape, true, false);
-        }
+        std::shared_ptr<ov::Node> q_len_idx = register_new_node<v4::Range>(zero_without_shape,
+                                                                           curr_seqlen_scalar,
+                                                                           one_without_shape,
+                                                                           ov::element::i64);
+        concat_kv_len = register_new_node<v0::Convert>(total_sequence_length, ov::element::i64);
+        past_kv_len = register_new_node<v1::Subtract>(concat_kv_len, current_seqlen);
+        // past_kv_len = past_seqlen;
+        // concat_kv_len = seqlens_1d;
         q_pos_ids = register_new_node<v1::Add>(q_len_idx, past_seqlen);
 
         kv_slices = std::make_shared<ov::op::v0::Concat>(ov::NodeVector{zero, seqlens_1d, negone}, 0);
-        concat_kv_len = seqlens_1d;
 
-        cache = &m_seqk_cache.insert_or_assign(seqlens_k, CachedNodes{q_pos_ids, kv_slices, concat_kv_len}).first->second;
+        cache = &m_seqk_cache.insert_or_assign(seqlens_k, CachedNodes{q_pos_ids, kv_slices, past_kv_len, concat_kv_len})
+                     .first->second;
     }
     OPENVINO_ASSERT(cache);
-
 
     if (do_rotary) {
         auto cos_cache = node->input_value(7);
@@ -204,41 +186,46 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
     }
     const auto is_static_input = K.get_partial_shape().is_static() && past_key.get_partial_shape().is_static();
 
-    if (is_static_input) {
-        // static design for GQA (KV cache is static max length, valid KVs are left align)
-        // inputs are:
-        //   1. past_key/past_value: [1, num_heads, max_seq_len, head_size], data is in the front along axis 2, [P0, P1,
-        //   ..., Pn, 0, 0, ...]
-        //   2. current K/V: [1, num_heads, current_kv_len, head_size], data is in the front along axis 2, [C0, C1, ...,
-        //   Ck, 0, 0, ...]
-        // Output present_key/present_value has the same shape with past_key/past_value, but with data in order [P0, P1,
-        // ..., Pn, C0, C1, ..., Ck, 0, 0, ...]
-        //
-        // Use ScatterUpdate to scatter insert Current into Past
-        // Insert current K/V at the correct position [past_seqlen, past_seqlen+curr_seqlen].
-        std::shared_ptr<ov::Node> scatter_idx =
-            register_new_node<v4::Range>(zero_without_shape, curr_seqlen_scalar, one_without_shape, ov::element::i64);
-        scatter_idx = register_new_node<v1::Add>(scatter_idx, past_seqlen);
-        const auto scatter_axis = register_new_node(v0::Constant::create(ov::element::i64, ov::Shape{1}, {2}));
-        K = register_new_node<v3::ScatterUpdate>(past_key, scatter_idx, K, scatter_axis);
-        V = register_new_node<v3::ScatterUpdate>(past_value, scatter_idx, V, scatter_axis);
-    } else if (inplacekv) {
+    if (past_key.get_partial_shape().is_static() && past_value.get_partial_shape().is_static() && origingqa) {
+        // past/present being static, should be of max_seq_len shape and being inplace
+        if (K.get_partial_shape().is_static()) {  // for NPU
+            // static design for GQA (KV cache is static max length, valid KVs are left align)
+            // inputs are:
+            //   1. past_key/past_value: [1, num_heads, max_seq_len, head_size], data is in the front along axis 2, [P0, P1,
+            //   ..., Pn, 0, 0, ...]
+            //   2. current K/V: [1, num_heads, current_kv_len, head_size], data is in the front along axis 2, [C0, C1, ...,
+            //   Ck, 0, 0, ...]
+            // Output present_key/present_value has the same shape with past_key/past_value, but with data in order [P0, P1,
+            // ..., Pn, C0, C1, ..., Ck, 0, 0, ...]
+            //
+            // Use ScatterUpdate to scatter insert Current into Past
+            // Insert current K/V at the correct position [past_seqlen, past_seqlen+curr_seqlen].
+            std::shared_ptr<ov::Node> scatter_idx = register_new_node<v4::Range>(zero_without_shape,
+                                                                                 curr_seqlen_scalar,
+                                                                                 one_without_shape,
+                                                                                 ov::element::i64);
+            scatter_idx = register_new_node<v1::Add>(scatter_idx, past_seqlen);
+            const auto scatter_axis = register_new_node(v0::Constant::create(ov::element::i64, ov::Shape{1}, {2}));
+            K = register_new_node<v3::ScatterUpdate>(past_key, scatter_idx, K, scatter_axis);
+            V = register_new_node<v3::ScatterUpdate>(past_value, scatter_idx, V, scatter_axis);
+        } else {
+            auto updateK = register_new_node<v3::ScatterUpdate>(past_key, q_pos_ids, K, two);
+            auto updateV = register_new_node<v3::ScatterUpdate>(past_value, q_pos_ids, V, two);
 
-        auto updateK = register_new_node<v3::ScatterUpdate>(past_key, q_pos_ids, K, two);
-        auto updateV = register_new_node<v3::ScatterUpdate>(past_value, q_pos_ids, V, two);
-
-        K = std::make_shared<ov::op::v1::VariadicSplit>(updateK, two_scalar, kv_slices)->outputs()[1];
-        V = std::make_shared<ov::op::v1::VariadicSplit>(updateV, two_scalar, kv_slices)->outputs()[1];
+            K = std::make_shared<ov::op::v1::VariadicSplit>(updateK, two_scalar, kv_slices)->outputs()[1];
+            V = std::make_shared<ov::op::v1::VariadicSplit>(updateV, two_scalar, kv_slices)->outputs()[1];
+        }
     } else {
+        // assume being dynamic, and present len = past+current
         auto construct_kv_cache = [&](const ov::Output<ov::Node>& past, const ov::Output<ov::Node>& current) {
             return register_new_node<v0::Concat>(ov::OutputVector{past, current}, 2);
         };
-        past_key = register_new_node<v8::Slice>(past_key, zero, past_seqlen, one, two);
-        past_value = register_new_node<v8::Slice>(past_value, zero, past_seqlen, one, two);
+        past_key = register_new_node<v8::Slice>(past_key, zero, past_kv_len, one, two);
+        past_value = register_new_node<v8::Slice>(past_value, zero, past_kv_len, one, two);
         K = construct_kv_cache(past_key, K);
         V = construct_kv_cache(past_value, V);
     }
-
+    
     ov::Output<ov::Node> present_k = K;
     ov::Output<ov::Node> present_v = V;
 
