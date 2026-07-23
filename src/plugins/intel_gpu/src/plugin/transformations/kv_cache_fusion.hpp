@@ -87,5 +87,26 @@ public:
     bool run_on_model(const std::shared_ptr<ov::Model>& m) override;
 };
 
+class StatelessKVFusionMatcher : public ov::pass::MatcherPass {
+public:
+    OPENVINO_MATCHER_PASS_RTTI("StatelessKVFusionMatcher");
+    StatelessKVFusionMatcher();
+
+private:
+    struct CachedNodes {
+        ov::Output<ov::Node> update_pos_ids;
+        ov::Output<ov::Node> concat_kv_len;
+    };
+    std::map<ov::Output<ov::Node>, CachedNodes> m_seqk_cache;
+};
+
+class StatelessKVFusion : public ov::pass::GraphRewrite {
+public:
+    OPENVINO_GRAPH_REWRITE_RTTI("StatelessKVFusion");
+    StatelessKVFusion();
+
+    bool run_on_model(const std::shared_ptr<ov::Model>& m) override;
+};
+
 
 }   // namespace ov::intel_gpu
