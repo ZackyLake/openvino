@@ -466,6 +466,18 @@ void SyncInferRequest::wait() {
             }
         }
 
+        static const auto inplacekv = []() {
+            const auto txt = std::getenv("inplacekv");
+            return !(txt && txt == std::string_view("false"));
+        }();
+        bool zerocopy = false;
+        if (inplacekv) {
+            if (internal_name.find("present") != std::string::npos) {
+                zerocopy = true;
+            }
+        }
+
+
         if (need_output_update) {
             OV_ITT_SCOPED_TASK(itt::domains::intel_gpu_plugin, "SyncInferRequest::wait::update_output");
             auto mem_shape = output_layout.get_shape();
@@ -514,7 +526,9 @@ void SyncInferRequest::wait() {
 
         // mapping remote blobs not needed -
         // let the user take care of them explicitly
-        if (!is_remote_tensor_impl && output_memory) {
+        if (zerocopy) {
+        }
+        else if (!is_remote_tensor_impl && output_memory) {
             if (!is_generic_remote) {
                 auto dst_ptr = static_cast<uint8_t*>(output_tensor->data());
                 bool same_mem = same_host_mem(output_memory, dst_ptr);
@@ -1058,18 +1072,37 @@ std::vector<cldnn::event::ptr> SyncInferRequest::prepare_output(size_t output_id
         m_plugin_outputs[output_idx] = user_tensor_wrapper;
     }
 
-    if (!is_dynamic) {
+    {
         bool need_lockable_mem = network->does_node_need_lockable_output(internal_name);
         bool has_device_buffer = m_plugin_outputs.count(output_idx) > 0;
         bool update_device_tensor = !has_device_buffer ||
                                     is_generic_remote ||
                                     (m_plugin_outputs[output_idx].owner == TensorOwner::USER && !is_remote_tensor_impl);
         if (update_device_tensor) {
-            if (!is_remote_tensor_impl) {
-                m_plugin_outputs[output_idx] =
-                    create_or_share_device_tensor(user_tensor_wrapper, internal_name, pshape, device_tensor_et, need_lockable_mem || convert_needed);
+            if (!is_dynamic) {
+                if (!is_remote_tensor_impl) {
+                    m_plugin_outputs[output_idx] =
+                        create_or_share_device_tensor(user_tensor_wrapper, internal_name, pshape, device_tensor_et, need_lockable_mem || convert_needed);
+                } else {
+                    m_plugin_outputs[output_idx] = { create_device_tensor(pshape, device_tensor_et, need_lockable_mem || convert_needed), TensorOwner::PLUGIN };
+                }
             } else {
-                m_plugin_outputs[output_idx] = { create_device_tensor(pshape, device_tensor_et, need_lockable_mem || convert_needed), TensorOwner::PLUGIN };
+                auto& engine = m_graph->get_engine();
+                auto user_tensor_mem_type = !is_remote_tensor_impl ? engine.detect_usm_allocation_type(user_tensor->data()) : cldnn::allocation_type::unknown;
+                auto usm_host_raw_ptr =
+                    engine.get_device_info().dev_type == cldnn::device_type::integrated_gpu && user_tensor_mem_type == cldnn::allocation_type::usm_host;
+                if (usm_host_raw_ptr) {
+                    GPU_DEBUG_LOG << "set zero-copy output tensor: [" << internal_name << "] with USM: " << user_tensor_mem_type << "("
+                                  << user_tensor->get_shape() << ")" << std::endl;
+                    m_plugin_outputs[output_idx] = {std::make_shared<RemoteTensorImpl>(m_context,
+                                                                                       user_tensor->get_shape(),
+                                                                                       ::data_type_for_remote_tensor(element_type),
+                                                                                       TensorType::BT_USM_SHARED,
+                                                                                       user_tensor->data()),
+                                                    TensorOwner::USER};
+                    auto block_it = m_output_memory_blocks.find(output_idx);
+                    network->register_output_memory_block(internal_name, block_it->second.get());
+                }
             }
         }
     }

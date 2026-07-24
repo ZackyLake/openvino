@@ -1058,6 +1058,43 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
         }
     }
 
+    static const auto inplacekv = []() {
+        const auto txt = std::getenv("inplacekv");
+        return !(txt && txt == std::string_view("false"));
+    }();
+
+    if (get_node().is_type<scatter_elements_update>() || get_node().is_type<scatter_update>()) {
+        if (actual_layouts[0] != _impl_params->get_input_layout(0)) {
+            GPU_DEBUG_TRACE_DETAIL << id() << ": scatter_*_update has different layout so skip inplace" << std::endl;
+        } else if (inplacekv) {
+            GPU_DEBUG_TRACE_DETAIL << id() << ": try make scatter_*_update inplace, output[" << (_outputs[0] ? _outputs[0]->buffer_ptr() : nullptr)
+                                   << "] allocated = " << mem_allocated() << std::endl;
+            if (!_outputs[0] || !mem_allocated()) {
+                GPU_DEBUG_TRACE_DETAIL << id() << ": make output[" << _impl_params->get_output_layout(0).to_short_string() << "] be input["
+                                       << _impl_params->get_input_layout(0).to_short_string() << "]" << std::endl;
+                _outputs[0] = input_memory_ptr(0);
+                _max_output_layout_count[0] = _outputs[0]->count();
+                return;
+            } else {
+                GPU_DEBUG_TRACE_DETAIL << id() << ": has output[" << _outputs[0]->buffer_ptr() << "] and input[" << input_memory_ptr(0)->buffer_ptr() << "]"
+                                       << std::endl;
+            }
+        }
+    }
+    if (is_output() && get_node().is_type<reorder>()) {
+        if (inplacekv) {
+            auto* ext_block = get_network().get_output_memory_block(id());
+            GPU_DEBUG_TRACE_DETAIL << id() << ": has output[" << _outputs[0]->buffer_ptr() << "] and input[" << input_memory_ptr(0)->buffer_ptr()
+                                   << "] and extblock[" << (ext_block ? ext_block->rawPtr() : nullptr) << "]" << std::endl;
+            if (!_outputs[0] || _network.get_engine().is_the_same_buffer(output_memory(), input_memory())) {
+                _outputs[0] = get_network().get_engine().reinterpret_buffer(input_memory(0), actual_layouts[0]);
+                GPU_DEBUG_TRACE_DETAIL << id() << ": inplace reinterpret output into [" << _outputs[0]->get_layout() << "]" << std::endl;
+                set_flag(ExecutionFlags::SKIP);
+                return;
+            }
+        }
+    }
+
     // update layout to ensure that it respects paddings for correct allocation size
     if (_node_output_layout.data_padding.is_dynamic()) {
         auto update_padding = [](layout& orig_layout) {
