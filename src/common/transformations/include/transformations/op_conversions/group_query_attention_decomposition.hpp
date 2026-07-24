@@ -51,4 +51,12 @@ private:
                                           int64_t kv_cache_bit_width,
                                           const std::string& quant_type,
                                           const ov::element::Type& cache_type);
+    struct CachedNodes {
+        ov::Output<ov::Node> pos_ids;
+        ov::Output<ov::Node> kv_slices;
+        std::shared_ptr<ov::Node> past_kv_len;
+        std::shared_ptr<ov::Node> concat_kv_len;
+        std::map<ov::Output<ov::Node>, ov::Output<ov::Node>> rotary_cache;
+    };
+    std::map<ov::Output<ov::Node>, CachedNodes> m_seqk_cache;
 };
