@@ -166,7 +166,7 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
         // concat_kv_len = seqlens_1d;
         q_pos_ids = register_new_node<v1::Add>(q_len_idx, past_seqlen);
 
-        kv_slices = std::make_shared<ov::op::v0::Concat>(ov::NodeVector{zero, seqlens_1d, negone}, 0);
+        kv_slices = std::make_shared<ov::op::v0::Concat>(ov::NodeVector{seqlens_1d, negone}, 0);
 
         cache = &m_seqk_cache.insert_or_assign(seqlens_k, CachedNodes{q_pos_ids, kv_slices, past_kv_len, concat_kv_len})
                      .first->second;
