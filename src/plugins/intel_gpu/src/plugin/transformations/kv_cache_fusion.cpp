@@ -383,47 +383,43 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
                 if (kv_to_sdpa_input->get_index() != 0) {
                     return false;
                 }
+
                 auto split_axis_node = ov::as_type_ptr<ov::op::v0::Constant>(split_node->get_input_node_shared_ptr(1));
                 auto split_lengths_node = ov::as_type_ptr<ov::op::v0::Concat>(split_node->get_input_node_shared_ptr(2));
-                if (!split_axis_node || !split_lengths_node || split_lengths_node->get_input_size() != 3) {
+                if (!split_axis_node || !split_lengths_node || split_lengths_node->get_input_size() != 2) {
                     return false;
-                }
-                auto split_begin_node =
-                    ov::as_type_ptr<ov::op::v0::Constant>(split_lengths_node->get_input_node_shared_ptr(0));
-                auto split_tail_node =
-                    ov::as_type_ptr<ov::op::v0::Constant>(split_lengths_node->get_input_node_shared_ptr(2));
-                if (!split_begin_node || !split_tail_node) {
-                    return false;
-                }
-                auto split_present_output = split_lengths_node->input_value(1);
-                if (const auto split_present_reshape =
-                        ov::as_type_ptr<ov::op::v1::Reshape>(split_present_output.get_node_shared_ptr())) {
-                    split_present_output = split_present_reshape->input_value(0);
                 }
 
                 const auto split_axis_values = split_axis_node->cast_vector<int64_t>();
                 if (split_axis_values.size() != 1 || target_axis != split_axis_values[0]) {
                     return false;
                 }
+
+                auto split_tail_node =
+                    ov::as_type_ptr<ov::op::v0::Constant>(split_lengths_node->get_input_node_shared_ptr(2));
+                if (!split_tail_node) {
+                    return false;
+                }
+                const auto split_tail_values = split_tail_node->cast_vector<int64_t>();
+                if (split_tail_values.size() != 1 || split_tail_values[0] != -1) {
+                    return false;
+                }
+
+                auto split_present_output = split_lengths_node->input_value(0);
+                if (const auto split_present_reshape =
+                        ov::as_type_ptr<ov::op::v1::Reshape>(split_present_output.get_node_shared_ptr())) {
+                    split_present_output = split_present_reshape->input_value(0);
+                }
                 if (const auto plen_shape = split_present_output.get_partial_shape(); plen_shape.is_dynamic() || shape_size(plen_shape.get_shape()) != 1) {
                     return false;
                 }
                 seqlen_output = split_present_output;
 
-                const auto split_begin_values = split_begin_node->cast_vector<int64_t>();
-                const auto split_tail_values = split_tail_node->cast_vector<int64_t>();
-                if (split_begin_values.size() != 1 || split_begin_values[0] != 0 || split_tail_values.size() != 1 || split_tail_values[0] != -1) {
-                    return false;
-                }
-
-                if (split_node->get_output_size() != 3) {
-                    return false;
-                }
-                if (!split_node->output(0).get_target_inputs().empty() || !split_node->output(2).get_target_inputs().empty()) {
+                if (split_node->get_output_size() != 2 || !split_node->output(1).get_target_inputs().empty()) {
                     return false;
                 }
                 node_infos.push_back(split_node);
-                const auto split_output_consumers = split_node->output(1).get_target_inputs();
+                const auto split_output_consumers = split_node->output(0).get_target_inputs();
                 if (split_output_consumers.size() != 1) {
                     return false;
                 }

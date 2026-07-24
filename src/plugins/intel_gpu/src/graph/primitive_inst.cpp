@@ -475,7 +475,9 @@ void primitive_inst::update_shape() {
         auto& new_layout = new_layouts[idx];
         auto new_pshape = new_layout.get_partial_shape();
         auto& impl_layout = _impl_params->get_output_layout(idx);
-        if (!get_node().is_type<reshape>() || (!get_node().get_input_layout(0).data_padding.is_dynamic() && !get_node().can_be_optimized())) {
+        if (get_node().is_type<stateless_kv>() && idx == 1) {
+            // stateless_kv updates padding in every iteration, don't accumulate.
+        } else if (!get_node().is_type<reshape>() || (!get_node().get_input_layout(0).data_padding.is_dynamic() && !get_node().can_be_optimized())) {
             auto data_padding = padding::max(impl_layout.data_padding, new_layout.data_padding);
             new_layout.data_padding = padding::max(get_node().get_primitive()->get_output_padding(idx), data_padding);
         }
