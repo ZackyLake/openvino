@@ -45,3 +45,5 @@ endif()
 if(ENABLE_OV_GGUF_FRONTEND)
     add_subdirectory(gguf)
 endif()
+
+add_subdirectory(cgc)

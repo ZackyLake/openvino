@@ -49,10 +49,15 @@ QuantizationDetails::QuantizationDetails(const size_t levels, const std::vector<
       outputLowValues(outputLowValues),
       outputHighValues(outputHighValues) {}
 
-bool QuantizationDetails::outputLayoutIsSupported(std::shared_ptr<ov::opset1::FakeQuantize> quantize, bool isConvertExpected) {
+bool QuantizationDetails::outputLayoutIsSupported(std::shared_ptr<ov::opset1::FakeQuantize> quantize,
+                                                  bool isConvertExpected,
+                                                  bool isReshapeExpected) {
     const auto inputs = quantize->inputs();
     for (size_t i = 1; i < inputs.size(); ++i) {
-        const auto node = inputs[i].get_source_output().get_node_shared_ptr();
+        auto node = inputs[i].get_source_output().get_node_shared_ptr();
+        if (isReshapeExpected && ov::is_type<ov::opset1::Reshape>(node)) {
+            node = node->get_input_node_shared_ptr(0);
+        }
         bool supported = ov::is_type<ov::opset1::Constant>(node);
         if (!supported && isConvertExpected) {
             supported = ov::is_type<ov::opset1::Convert>(node) && ov::is_type<ov::opset1::Constant>(node->get_input_node_ptr(0));
