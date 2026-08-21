@@ -541,7 +541,7 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
             return {};
         };
         // mask trimming for pure-scatter_update case
-        if (!is_slice_concat && !is_update_split && sdpa_node && sdpa_node->inputs().size() == 4 &&
+        if (!is_slice_concat && !is_update_split && sdpa_node && sdpa_node->inputs().size() - sdpa_node->get_compression_inputs_num() >= 4 &&
             m_trimmed_masks.count(sdpa_node->input_value(3)) == 0) {
             const auto full_mask = sdpa_node->input_value(3);
             const auto& cur_seqlen = new_token_shape[target_axis];
