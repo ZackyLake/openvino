@@ -499,8 +499,12 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
                     // should already be garuanteed
                 }
 
-                seqlen_output = past_seqlen_output;
-                is_present_len = false;
+                if (cache->present_kv_len.get_node()) {
+                    seqlen_output = cache->present_kv_len;
+                } else {
+                    seqlen_output = past_seqlen_output;
+                    is_present_len = false;
+                }
             }
         }
 

@@ -812,6 +812,10 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
         });
         OPENVINO_ASSERT(output_it != users.end(), "[GPU] stateless_kv should directly connect to an output");
 
+        const auto& past_layout = _impl_params->get_input_layout();
+        const auto& mid_layout = _impl_params->get_output_layout(0);
+        const auto& target_layout = _impl_params->get_output_layout(1);
+
         auto& result = **output_it;
         if (result.is_dynamic()) {
             if (!result._update_shape_done_by_other) {
@@ -819,7 +823,7 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
                 result._update_shape_done_by_other = true;
             }
         }
-        if (!result.output_memory_ptr()) {
+        if (!result.output_memory_ptr() || past_layout != mid_layout) {
             result.set_can_be_optimized(false);
         }
         result.realloc_if_needed();
@@ -829,9 +833,6 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
         const auto present_tensor = result.output_memory_ptr();
         OPENVINO_ASSERT(present_tensor, "[GPU] Output memory of ", result.id(), " is not prepared for stateless_kv node ", id());
         const auto is_same = _network.get_engine().is_the_same_buffer(*present_tensor, *past_tensor);
-        const auto& past_layout = _impl_params->get_input_layout();
-        const auto& mid_layout = _impl_params->get_output_layout(0);
-        const auto& target_layout = _impl_params->get_output_layout(1);
         const auto& present_layout = result._impl_params->get_output_layout();
         if (mid_layout == present_layout) {
             result.set_can_be_optimized(true);
@@ -845,6 +846,10 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
         // const auto target_axis = get_typed_desc<stateless_kv>()->concat_axis;
         // OPENVINO_ASSERT(present_layout.get_dim(target_axis) >= target_layout.get_dim(target_axis));
 
+        if (_outputs[0] && _mem_allocated) {
+            GPU_DEBUG_TRACE_DETAIL << id() << ": release previous allocated memory[" << _outputs[0]->buffer_ptr() << "]" << std::endl;
+            get_network().get_memory_pool().release_memory(_outputs[0].get(), get_node().get_unique_id(), get_node().id(), _network.get_id());
+        }
         _outputs[0] = present_tensor;
         _outputs[1] = get_network().get_engine().reinterpret_buffer(*present_tensor, target_layout);
         this->_mem_allocated = false;
