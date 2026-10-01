@@ -202,7 +202,7 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
         V = dequantize_kv(V, v_scale, kv_num_heads, kv_cache_bit_width, v_quant_type, T);
     }
 
-    const auto concat_kv_len = get_dimensions(K.get_node_shared_ptr(), {2});
+    const auto concat_kv_len = get_dimensions(K, {2});
     const auto concat_kv_len_scalar = register_new_node<v0::Squeeze>(concat_kv_len);
 
     // Broadcast KV if grouped query attention
@@ -320,7 +320,7 @@ ov::pass::GroupQueryAttentionDecomposition::KVCacheOutputs ov::pass::GroupQueryA
         // Windowed KV cache (capacity C, rolled with front eviction). end_before/end_after are the resident
         // row counts before/after appending the S new tokens (see windowed_cache_end).
         const auto local_window_size = node->get_local_window_size();
-        const auto capacity = get_dimensions(past_key.get_node_shared_ptr(), {2});
+        const auto capacity = get_dimensions(past_key, {2});
         const auto capacity_scalar = register_new_node<v0::Squeeze>(capacity);
         const auto abs_past_scalar = register_new_node<v0::Squeeze>(past_seqlen);  // P
         const auto abs_total_scalar = register_new_node<v0::Squeeze>(seqlens_1d);  // P + S
@@ -592,6 +592,12 @@ std::shared_ptr<ov::Node> ov::pass::GroupQueryAttentionDecomposition::get_dimens
     return get_dimensions(register_new_node<v3::ShapeOf>(node), dims);
 }
 
+std::shared_ptr<ov::Node> ov::pass::GroupQueryAttentionDecomposition::get_dimensions(
+    const ov::Output<ov::Node>& output,
+    const std::vector<int>& dims) {
+    return get_dimensions(register_new_node<v3::ShapeOf>(output), dims);
+}
+
 std::shared_ptr<ov::Node> ov::pass::GroupQueryAttentionDecomposition::rotaryEmbedding(ov::Output<ov::Node> input,
                                                                                       ov::Output<ov::Node> cos,
                                                                                       ov::Output<ov::Node> sin,
@@ -635,7 +641,7 @@ std::shared_ptr<ov::Node> ov::pass::GroupQueryAttentionDecomposition::rotaryEmbe
     if (interleaved) {
         input_shape = register_new_node<v3::ShapeOf>(rotary_input);
         dim_bns = get_dimensions(input_shape, {0, 1, 2});
-        half_head_size = get_dimensions(cos.get_node_shared_ptr(), {-1});
+        half_head_size = get_dimensions(cos, {-1});
         perm_5d = v0::Constant::create(ov::element::i64, ov::Shape{5}, {0, 1, 2, 4, 3});
 
         // Deinterleave: [bs,nh,seq,rotary_dim]

@@ -51,6 +51,7 @@ protected:
     std::shared_ptr<ov::Node> get_dimensions(const std::shared_ptr<op::v3::ShapeOf>& shape,
                                              const std::vector<int>& dims);
     std::shared_ptr<ov::Node> get_dimensions(const std::shared_ptr<ov::Node>& node, const std::vector<int>& dims);
+    std::shared_ptr<ov::Node> get_dimensions(const ov::Output<ov::Node>& output, const std::vector<int>& dims);
     std::shared_ptr<ov::Node> rotaryEmbedding(ov::Output<ov::Node> input,
                                               ov::Output<ov::Node> cos,
                                               ov::Output<ov::Node> sin,
