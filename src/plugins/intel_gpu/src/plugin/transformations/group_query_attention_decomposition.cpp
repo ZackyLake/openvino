@@ -222,11 +222,18 @@ GroupQueryAttentionDecomposition::KVCacheOutputs GroupQueryAttentionDecompositio
         present_value = get_exclusive_to_result(present_value_transpose->output(0));
     }
 
-    if (!present_key || !present_value) {
-        GPU_DEBUG_TRACE_DETAIL << "GQA not having key&value both exclusively connects to Result, key: "
-                               << (present_key ? present_key->get_friendly_name() : "null")
-                               << " value: " << (present_value ? present_value->get_friendly_name() : "null") << " so fallback to common decompose"
-                               << std::endl;
+    // A windowed StatelessKV takes the rolling cache's capacity from the past buffer, which must hold at least
+    // a full window to roll, so a past statically shorter than the window - e.g. the typed-empty 0-row past a
+    // growing cache carries on its first chunk, with or without query_seqlens - stays on the common decompose,
+    // where the SDPA sliding window pairs with the growing Concat cache. A capacity-sized past keeps the
+    // StatelessKV path.
+    const auto past_rows = past_key.get_partial_shape()[2];
+    const bool windowed_past_too_short = sliding_window && past_rows.is_static() && past_rows.get_length() < window_size;
+
+    if (!present_key || !present_value || windowed_past_too_short) {
+        GPU_DEBUG_TRACE_DETAIL << "GQA fallback to common decompose: " << (windowed_past_too_short ? "sliding window past shorter than the window; " : "")
+                               << "present key " << (present_key ? "exclusive" : "not exclusive") << ", present value "
+                               << (present_value ? "exclusive" : "not exclusive") << std::endl;
         auto outputs = ov::pass::GroupQueryAttentionDecomposition::construct_kvcache(node,
                                                                                      past_key,
                                                                                      past_value,
@@ -237,7 +244,11 @@ GroupQueryAttentionDecomposition::KVCacheOutputs GroupQueryAttentionDecompositio
                                                                                      past_seqlen,
                                                                                      current_seqlen_scalar,
                                                                                      metadata_);
-        if (!node->get_sliding_window_cache() && node->has_fixed_kv_capacity()) {
+        // The causal trim restores fused-SDPA behavior on the static (fixed capacity) path: fused SDPA applies
+        // the causal mask internally and reads only [0, past + current). The explicit attention chain (softcap
+        // or qk_output) materializes scores over the K/V it is given, so trimming it would shrink output_qk
+        // past the total_sequence_length width its consumers expect.
+        if (!use_explicit_attention && !node->get_sliding_window_cache() && node->has_fixed_kv_capacity()) {
             // static path put full buffer to SDPA, trim it for causal.
             const auto slice_start = register_new_node(v0::Constant::create(ov::element::i64, ov::Shape{1}, {0}));
             const auto slice_step = register_new_node(v0::Constant::create(ov::element::i64, ov::Shape{1}, {1}));

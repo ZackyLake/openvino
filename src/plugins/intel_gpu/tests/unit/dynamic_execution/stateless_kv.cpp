@@ -1133,3 +1133,135 @@ INSTANTIATE_TEST_SUITE_P(smoke,
                          [](const testing::TestParamInfo<data_types>& info) {
                              return ov::element::Type(info.param).get_type_name();
                          });
+
+// ---- Contract tests for the optional cur_seq_len input (PR #39582) ----
+
+// First right-padded chunk reaching the cur_len path: empty past, S=5 rows of which cur=3 are real tokens.
+// The GQA contract is total_sequence_length = past + cur = 3, so the write offset P = total - cur is 0 and
+// only the cur real rows are written at the head of the cache. Both outputs span past_rows + S rows: the
+// padded tail is beyond total, so no valid query reads it and the next step neither copies nor keeps it.
+// (In production the tail rows of the chunk tensor were zeroed by the core decompose's Select masking.)
+TEST(stateless_kv_runtime, empty_past_padded_chunk_cur_len_contract) {
+    auto& engine = get_test_engine();
+
+    constexpr int64_t batch = 1, heads = 2, head_size = 4;
+    constexpr int64_t new_rows = 5;   // padded chunk rows (S)
+    constexpr int64_t cur_len = 3;    // valid rows (query_seqlens)
+    constexpr int64_t total_len = 3;  // past (0) + cur
+    constexpr int64_t capacity = 12;
+
+    const auto past_layout = layout{ov::PartialShape{batch, heads, 0, head_size}, data_types::f32, format::bfyx};
+    const auto new_token_layout = layout{ov::PartialShape{batch, heads, new_rows, head_size}, data_types::f32, format::bfyx};
+    const auto seq_len_layout = layout{ov::PartialShape{1}, data_types::i64, format::bfyx};
+
+    std::vector<input_info> inputs = {input_info("past"), input_info("new_token"), input_info("present_len"), input_info("cur_seq_len")};
+    auto prim = stateless_kv("stateless_kv_contract", inputs, 2, true, 0, false);
+    prim.num_outputs = 2;
+    prim.output_data_types = {data_types::f32, data_types::f32};
+
+    topology topology;
+    topology.add(input_layout("past", layout{ov::PartialShape{batch, heads, -1, head_size}, data_types::f32, format::bfyx}));
+    topology.add(input_layout("new_token", new_token_layout));
+    topology.add(input_layout("present_len", seq_len_layout));
+    topology.add(input_layout("cur_seq_len", seq_len_layout));
+    topology.add(prim);
+    topology.add(reorder("result", input_info("stateless_kv_contract", 0), format::bfyx, data_types::f32));
+
+    ExecutionConfig config = get_test_default_config(engine);
+    config.set_property(ov::intel_gpu::allow_new_shape_infer(true));
+    config.set_property(ov::intel_gpu::optimize_data(true));
+
+    auto network_ptr = get_network(engine, topology, config, get_test_stream_ptr(), false);
+    auto& network = *network_ptr;
+
+    auto past = engine.allocate_memory(past_layout);
+    auto new_token = engine.allocate_memory(new_token_layout);
+    auto seq_len = engine.allocate_memory(seq_len_layout);
+    auto cur_seq_len = engine.allocate_memory(seq_len_layout);
+    std::vector<float> new_token_values(new_token_layout.count());
+    for (size_t i = 0; i < new_token_values.size(); ++i) {
+        new_token_values[i] = static_cast<float>(1000 + i);
+    }
+    set_values(new_token, new_token_values);
+    set_values<int64_t>(seq_len, {total_len});
+    set_values<int64_t>(cur_seq_len, {cur_len});
+
+    const auto cache_layout = layout{ov::PartialShape{batch, heads, capacity, head_size}, data_types::f32, format::bfyx};
+    auto cache = engine.allocate_memory(cache_layout);
+    std::vector<float> cache_values(cache->count(), -1.0f);
+    set_values(cache, cache_values);
+
+    network.set_input_data("past", past);
+    network.set_input_data("new_token", new_token);
+    network.set_input_data("present_len", seq_len);
+    network.set_input_data("cur_seq_len", cur_seq_len);
+    network.set_output_memory("result", cache);
+
+    const auto outputs = network.execute();
+    const auto stateless_kv_inst = network.get_primitive("stateless_kv_contract");
+    const auto output0 = stateless_kv_inst->output_memory_ptr(0);
+    const auto output1 = stateless_kv_inst->output_memory_ptr(1);
+    ASSERT_NE(output0, nullptr);
+    ASSERT_NE(output1, nullptr);
+    (void)outputs;
+
+    EXPECT_EQ(output1->get_layout().get_partial_shape(), ov::PartialShape({batch, heads, new_rows, head_size}));
+    EXPECT_EQ(output0->get_layout().get_partial_shape(), ov::PartialShape({batch, heads, new_rows, head_size}));
+
+    // Only the first cur rows were written, at [total - cur, total) = [0, cur); the padded rows [cur, S) of
+    // both outputs keep the buffer content that was there before (the -1 sentinel below).
+    std::vector<float> expected(batch * heads * new_rows * head_size, -1.0f);
+    for (int64_t h = 0; h < heads; ++h) {
+        for (int64_t r = 0; r < cur_len; ++r) {
+            std::copy_n(new_token_values.begin() + (h * new_rows + r) * head_size, head_size, expected.begin() + (h * new_rows + r) * head_size);
+        }
+    }
+    mem_lock<float, mem_lock_type::read> output_lock(output0, get_test_stream());
+    const std::vector<float> actual(output_lock.begin(), output_lock.begin() + expected.size());
+    EXPECT_THAT(actual, testing::ElementsAreArray(expected));
+}
+
+// A windowed stateless_kv reads its cache capacity from the past buffer, so a past shorter than the window
+// (e.g. the typed-empty 0-row past of a growing cache) is rejected rather than silently producing a broken
+// rolling window. The GQA decomposition keeps such models on the common decompose path.
+TEST(stateless_kv_runtime, windowed_requires_capacity_sized_past) {
+    auto& engine = get_test_engine();
+
+    constexpr int64_t batch = 1, heads = 2, head_size = 4;
+    constexpr int64_t window_size = 4;
+    constexpr int64_t new_rows = 3;
+
+    const auto past_layout = layout{ov::PartialShape{batch, heads, 0, head_size}, data_types::f32, format::bfyx};
+    const auto new_token_layout = layout{ov::PartialShape{batch, heads, new_rows, head_size}, data_types::f32, format::bfyx};
+    const auto seq_len_layout = layout{ov::PartialShape{1}, data_types::i64, format::bfyx};
+
+    std::vector<input_info> inputs = {input_info("past"), input_info("new_token"), input_info("seq_len")};
+    auto prim = stateless_kv("stateless_kv_windowed_short_past", inputs, 2, false, window_size, false);
+    prim.num_outputs = 2;
+    prim.output_data_types = {data_types::f32, data_types::f32};
+
+    topology topology;
+    topology.add(input_layout("past", layout{ov::PartialShape{batch, heads, -1, head_size}, data_types::f32, format::bfyx}));
+    topology.add(input_layout("new_token", new_token_layout));
+    topology.add(input_layout("seq_len", seq_len_layout));
+    topology.add(prim);
+    topology.add(reorder("result", input_info("stateless_kv_windowed_short_past", 0), format::bfyx, data_types::f32));
+
+    ExecutionConfig config = get_test_default_config(engine);
+    config.set_property(ov::intel_gpu::allow_new_shape_infer(true));
+    config.set_property(ov::intel_gpu::optimize_data(true));
+
+    auto network_ptr = get_network(engine, topology, config, get_test_stream_ptr(), false);
+    auto& network = *network_ptr;
+
+    auto past = engine.allocate_memory(past_layout);
+    auto new_token = engine.allocate_memory(new_token_layout);
+    auto seq_len = engine.allocate_memory(seq_len_layout);
+    set_values<int64_t>(seq_len, {0});
+
+    network.set_input_data("past", past);
+    network.set_input_data("new_token", new_token);
+    network.set_input_data("seq_len", seq_len);
+
+    EXPECT_THROW(network.execute(), ov::Exception);
+}

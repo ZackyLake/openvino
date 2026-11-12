@@ -68,6 +68,7 @@ struct GQAConfig {
     bool query_seqlens = false;
     int64_t sequence_length = 1;
     bool present_key_slice = false;  // routes present key through a Slice before its Result
+    bool empty_past = false;         // past key/value are typed-empty 0-row Constants instead of Parameters (growing-cache first chunk)
 };
 
 std::shared_ptr<ov::Model> make_gqa_model(const GQAConfig& cfg) {
@@ -97,14 +98,26 @@ std::shared_ptr<ov::Model> make_gqa_model(const GQAConfig& cfg) {
     inputs[0] = query;
     inputs[1] = key;
     inputs[2] = value;
-    inputs[3] = past_key;
-    inputs[4] = gqa_past_value;
+    if (cfg.empty_past) {
+        const ov::Shape empty_past_shape{1, static_cast<size_t>(kv_num_heads), 0, static_cast<size_t>(cache_head_size)};
+        inputs[3] = ov::op::v0::Constant::create(cache_type, empty_past_shape, {});
+        inputs[4] = ov::op::v0::Constant::create(cache_type, empty_past_shape, {});
+    } else {
+        inputs[3] = past_key;
+        inputs[4] = gqa_past_value;
+    }
     inputs[5] = seqlens_k;
     inputs[6] = total_sequence_length;
     for (size_t i = 7; i <= 15; ++i) {
         inputs[i] = ov::op::v0::Constant::create(f32, ov::Shape{0}, {});
     }
-    ov::ParameterVector parameters{query, key, value, past_key, past_value, seqlens_k, total_sequence_length};
+    ov::ParameterVector parameters{query, key, value};
+    if (!cfg.empty_past) {
+        parameters.push_back(past_key);
+        parameters.push_back(past_value);
+    }
+    parameters.push_back(seqlens_k);
+    parameters.push_back(total_sequence_length);
 
     if (cfg.query_seqlens) {
         auto query_seqlens = std::make_shared<ov::op::v0::Parameter>(ov::element::i32, ov::PartialShape{1});
@@ -481,6 +494,129 @@ TEST(GQADecompositionTest, padded_query_fixed_capacity_uses_stateless_kv_present
     ASSERT_NE(sdpa, nullptr);
     EXPECT_TRUE(sdpa->get_causal());
     EXPECT_EQ(sdpa->get_causal_mask_alignment(), ov::intel_gpu::op::SDPA::CausalMaskAlignment::LOWER_RIGHT);
+}
+
+// Reviewer regression pin: #39495 guarded `query_seqlens && sliding_window` back to the SDPA fallback; this PR
+// removed the guard, so a padded chunk with a sliding-window cache and a capacity-sized past must reach the
+// StatelessKV cur_len path (a past shorter than the window stays on the fallback, see
+// padded_query_swa_empty_past_falls_back).
+TEST(GQADecompositionTest, padded_query_swa_uses_stateless_kv_cur_len) {
+    GQAConfig cfg;
+    cfg.query_seqlens = true;
+    cfg.sequence_length = 4;
+    cfg.local_window_size = 128;
+    cfg.sliding_window_cache = true;
+
+    const auto model = decompose_gqa_model(cfg);
+    const auto parameters = model->get_parameters();
+
+    std::shared_ptr<ov::intel_gpu::op::SDPA> sdpa;
+    std::vector<std::shared_ptr<ov::intel_gpu::op::StatelessKV>> statelesskvs;
+    for (const auto& node : model->get_ordered_ops()) {
+        if (auto current_sdpa = ov::as_type_ptr<ov::intel_gpu::op::SDPA>(node)) {
+            sdpa = current_sdpa;
+        }
+        if (auto stateless_kv = ov::as_type_ptr<ov::intel_gpu::op::StatelessKV>(node)) {
+            statelesskvs.emplace_back(std::move(stateless_kv));
+        }
+    }
+    ASSERT_NE(sdpa, nullptr);
+    EXPECT_EQ(sdpa->get_sliding_window_size(), cfg.local_window_size);
+
+    ASSERT_EQ(statelesskvs.size(), 2u);
+    for (const auto& stateless_kv : statelesskvs) {
+        ASSERT_EQ(stateless_kv->get_input_size(), 4u);
+        EXPECT_TRUE(ov::is_type<ov::op::v1::Reshape>(stateless_kv->input_value(2).get_node())) << "StatelessKV present length is not the total seqlens_1d";
+        EXPECT_EQ(stateless_kv->input_value(3).get_node_shared_ptr(), parameters.back()) << "StatelessKV cur_len is not query_seqlens";
+    }
+}
+
+TEST(GQADecompositionTest, padded_query_swa_fixed_capacity_uses_stateless_kv_cur_len) {
+    GQAConfig cfg;
+    cfg.query_seqlens = true;
+    cfg.sequence_length = 4;
+    cfg.local_window_size = 64;
+    cfg.sliding_window_cache = true;
+    cfg.static_past_cache = true;
+
+    const auto model = decompose_gqa_model(cfg);
+    const auto parameters = model->get_parameters();
+
+    std::shared_ptr<ov::intel_gpu::op::SDPA> sdpa;
+    size_t statelesskv_count = 0;
+    for (const auto& node : model->get_ordered_ops()) {
+        if (auto current_sdpa = ov::as_type_ptr<ov::intel_gpu::op::SDPA>(node)) {
+            sdpa = current_sdpa;
+        }
+        if (ov::is_type<ov::intel_gpu::op::StatelessKV>(node)) {
+            ++statelesskv_count;
+        }
+    }
+    ASSERT_NE(sdpa, nullptr);
+    EXPECT_EQ(sdpa->get_sliding_window_size(), cfg.local_window_size);
+    EXPECT_EQ(statelesskv_count, 2u);
+
+    for (const auto& node : model->get_ordered_ops()) {
+        if (auto stateless_kv = ov::as_type_ptr<ov::intel_gpu::op::StatelessKV>(node)) {
+            ASSERT_EQ(stateless_kv->get_input_size(), 4u);
+            EXPECT_EQ(stateless_kv->input_value(3).get_node_shared_ptr(), parameters.back()) << "StatelessKV cur_len is not query_seqlens";
+        }
+    }
+}
+
+// qk_output with an indirect present keeps the common decompose, where the explicit attention chain consumes
+// K/V at full total_sequence_length width. The causal trim that restores SDPA behavior on the static (fixed
+// capacity) path is for fused SDPA only: when applied to the explicit chain it shrinks output_qk to
+// past+current columns, which no consumer of the advertised total_sequence_length layout expects.
+TEST(GQADecompositionTest, qk_output_fixed_capacity_fallback_skips_kv_trim) {
+    GQAConfig cfg;
+    cfg.qk_output = QKOutput::BEFORE_SOFTMAX;
+    cfg.static_past_cache = true;
+    cfg.present_key_slice = true;
+
+    const auto model = expect_no_stateless_kv(cfg);
+
+    // The trim is the only Slice whose stop is the runtime Add(past, current); the present_key_slice fixture
+    // Slice uses constant stops and is a consumer of the cache, not of the attention inputs.
+    size_t trimmed_attention_kv = 0;
+    for (const auto& node : model->get_ordered_ops()) {
+        const auto slice = ov::as_type_ptr<ov::op::v8::Slice>(node);
+        if (slice && ov::is_type<ov::op::v1::Add>(slice->input_value(2).get_node_shared_ptr())) {
+            ++trimmed_attention_kv;
+        }
+    }
+    EXPECT_EQ(trimmed_attention_kv, 0u) << "explicit attention K/V must not be trimmed to past+current";
+}
+
+// A windowed StatelessKV takes its cache capacity from the past buffer, so the typed-empty past of a first
+// growing-cache right-padded chunk cannot roll a window: it must stay on the common decompose, which pairs
+// the SDPA sliding window with the growing cache Concat path.
+TEST(GQADecompositionTest, padded_query_swa_empty_past_falls_back) {
+    GQAConfig cfg;
+    cfg.query_seqlens = true;
+    cfg.sequence_length = 4;
+    cfg.local_window_size = 128;
+    cfg.sliding_window_cache = true;
+    cfg.empty_past = true;
+
+    const auto model = decompose_gqa_model(cfg);
+
+    // Unlike expect_no_stateless_kv this checks only the routing: the empty-Constant past makes the fallback
+    // Concat's shapes static and the standalone graph keeps the KV-head Expand, which downstream fusion
+    // removes, so the helper's SDPA shape expectations do not apply to this fixture.
+    std::shared_ptr<ov::intel_gpu::op::SDPA> sdpa;
+    size_t statelesskv_count = 0;
+    for (const auto& node : model->get_ordered_ops()) {
+        if (auto current_sdpa = ov::as_type_ptr<ov::intel_gpu::op::SDPA>(node)) {
+            sdpa = current_sdpa;
+        }
+        if (ov::is_type<ov::intel_gpu::op::StatelessKV>(node)) {
+            ++statelesskv_count;
+        }
+    }
+    EXPECT_EQ(statelesskv_count, 0u) << "a past shorter than the window cannot roll a StatelessKV cache";
+    ASSERT_NE(sdpa, nullptr);
+    EXPECT_EQ(sdpa->get_sliding_window_size(), cfg.local_window_size);
 }
 
 TEST(GQADecompositionTest, indirect_present_skips_stateless_kv) {
